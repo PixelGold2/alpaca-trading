@@ -86,3 +86,4 @@ if ($mkt.IsOpen) {
 
 Write-Log "=== TICK DONE ==="
 
+
