@@ -10,7 +10,7 @@ $TRADE_LOG   = "$PSScriptRoot\..\logs\trades_log.csv"
 
 $PAIRS         = @("BTC/USD","ETH/USD","SOL/USD","AVAX/USD","LINK/USD","BCH/USD","LTC/USD","DOGE/USD")
 $SESSION_HOURS = 5
-$MAX_POSITIONS = 2
+$MAX_POSITIONS = 3
 $RISK_PCT      = 0.005    # 0.5pct per trade - conservative since counter-trend
 $MAX_POS_PCT   = 0.08     # max 8pct equity per position
 $MIN_SCORE     = 5.0
@@ -231,5 +231,6 @@ foreach ($c in $ranked) {
 }
 
 Write-Narr "=== Done: $entered bounce entries. Run manage_bounce_positions.ps1 every 5 min. ==="
+
 
 

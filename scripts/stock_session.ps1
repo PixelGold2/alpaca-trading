@@ -13,7 +13,7 @@ $PAIRS = @(
     "AAPL","MSFT","NVDA","TSLA","META","AMZN","GOOGL","JPM"
 )
 
-$MAX_POSITIONS = 3
+$MAX_POSITIONS = 4
 $RISK_PCT      = 0.007   # 0.7% equity risk per trade
 $MAX_POS_PCT   = 0.10    # 10% equity max per position
 $MIN_SCORE     = 7.0
@@ -214,4 +214,5 @@ foreach ($c in $ranked) {
 }
 
 Write-Narr "=== Done: $entered stock entries. ==="
+
 
