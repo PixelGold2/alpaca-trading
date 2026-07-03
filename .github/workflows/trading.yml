@@ -22,7 +22,7 @@ jobs:
           fetch-depth: 0
 
       - name: Pull latest state
-        run: git pull --rebase origin main || true
+        run: git pull --rebase origin master || true
 
       - name: Run trading tick
         shell: pwsh
