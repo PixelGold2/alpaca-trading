@@ -1,0 +1,36 @@
+﻿{
+    "last_scan":  "2026-07-03T13:35:24.5112102+03:00",
+    "total_trades_placed":  2,
+    "positions":  [
+                      {
+                          "symbol":  "BAC",
+                          "qty":  709,
+                          "entry_est":  58.69,
+                          "stop_price":  57.28,
+                          "target_price":  62.92,
+                          "order_id":  "8709c98d-d13a-45fc-9fe1-a30451b50f0e",
+                          "opened_at":  "2026-07-03T13:35:23.9337893+03:00",
+                          "total_score":  10,
+                          "cong_score":  0,
+                          "pe_label":  "TTM:14.6",
+                          "congress":  "none",
+                          "tech_signal":  "BUY",
+                          "news_sent":  "BULLISH"
+                      },
+                      {
+                          "symbol":  "AMGN",
+                          "qty":  81,
+                          "entry_est":  373.97,
+                          "stop_price":  361.76,
+                          "target_price":  410.6,
+                          "order_id":  "61bddf09-3b44-4cc4-ac7a-837b29dfafc8",
+                          "opened_at":  "2026-07-03T13:35:24.4044668+03:00",
+                          "total_score":  9.5,
+                          "cong_score":  0,
+                          "pe_label":  "TTM:25.1",
+                          "congress":  "none",
+                          "tech_signal":  "BUY",
+                          "news_sent":  "BULLISH"
+                      }
+                  ]
+}
