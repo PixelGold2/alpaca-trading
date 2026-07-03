@@ -1,13 +1,14 @@
 # manage_smc_positions.ps1 - Lifecycle manager for SMC institutional positions.
-# Runs every tick. Moves stop to BE after 1R, T1 at 2R, T2 at 3R, then trails.
+# Progressive stop ladder: BE at 1R, +0.5R at 1.5R, T1 at 2R, +1R at 2.5R, T2 at 3R, ATR trail.
 # Tracks daily drawdown and consecutive losses.
 
 . "$PSScriptRoot\..\config.ps1"
 
-$STATE_FILE = "$PSScriptRoot\..\logs\smc_session_state.json"
-$NARR_LOG   = "$PSScriptRoot\..\logs\smc_session_log.csv"
-$TRADE_LOG  = "$PSScriptRoot\..\logs\trades_log.csv"
-$TRAIL_PCT  = 5.0   # 5% trailing stop
+$STATE_FILE      = "$PSScriptRoot\..\logs\smc_session_state.json"
+$NARR_LOG        = "$PSScriptRoot\..\logs\smc_session_log.csv"
+$TRADE_LOG       = "$PSScriptRoot\..\logs\trades_log.csv"
+$TRAIL_PCT_CRYPTO = 7.0   # trail % for crypto after T2
+$TRAIL_PCT_STOCK  = 4.0   # trail % for stocks after T2
 
 $alpacaHeaders = @{
     "APCA-API-KEY-ID"     = $env:APCA_API_KEY_ID
@@ -62,7 +63,7 @@ function Cancel-Order($id) {
 
 function Place-StopLimit($sym, $qty, $stop, $lim, $atyp) {
     if ($atyp -eq "crypto") { $q = TruncCrypto $qty } else { $q = TruncStock $qty }
-    $dp = if ($atyp -eq "crypto") { if ([double]$stop -ge 1000) { 2 } elseif ([double]$stop -ge 1) { 4 } else { 6 } } else { 2 }
+    $dp = Get-DP $stop $atyp
     $body = @{ symbol=$sym; qty="$q"; side="sell"; type="stop_limit"
                stop_price=[math]::Round($stop,$dp); limit_price=[math]::Round($lim,$dp); time_in_force="gtc" } | ConvertTo-Json
     $o = Invoke-RestMethod -Uri "$($env:APCA_API_BASE_URL)/v2/orders" -Method Post -Headers $alpacaHeaders -Body $body
@@ -71,19 +72,15 @@ function Place-StopLimit($sym, $qty, $stop, $lim, $atyp) {
 
 function Place-LimitSell($sym, $qty, $lim, $atyp) {
     if ($atyp -eq "crypto") { $q = TruncCrypto $qty } else { $q = TruncStock $qty }
-    $dp = if ($atyp -eq "crypto") { if ([double]$lim -ge 1000) { 2 } elseif ([double]$lim -ge 1) { 4 } else { 6 } } else { 2 }
-    $tif = "gtc"
-    $body = @{ symbol=$sym; qty="$q"; side="sell"; type="limit"; limit_price=[math]::Round($lim,$dp); time_in_force=$tif } | ConvertTo-Json
+    $dp = Get-DP $lim $atyp
+    $body = @{ symbol=$sym; qty="$q"; side="sell"; type="limit"; limit_price=[math]::Round($lim,$dp); time_in_force="gtc" } | ConvertTo-Json
     $o = Invoke-RestMethod -Uri "$($env:APCA_API_BASE_URL)/v2/orders" -Method Post -Headers $alpacaHeaders -Body $body
     Log-Trade $o "smc_t2"; return $o
 }
 
-function Place-MarketSell($sym, $qty, $atyp) {
-    if ($atyp -eq "crypto") { $q = TruncCrypto $qty } else { $q = TruncStock $qty }
-    $tif = if ($atyp -eq "crypto") { "gtc" } else { "day" }
-    $body = @{ symbol=$sym; qty="$q"; side="sell"; type="market"; time_in_force=$tif } | ConvertTo-Json
-    $o = Invoke-RestMethod -Uri "$($env:APCA_API_BASE_URL)/v2/orders" -Method Post -Headers $alpacaHeaders -Body $body
-    Log-Trade $o "smc_trail_exit"; return $o
+function Get-DP($price, $atyp) {
+    if ($atyp -eq "stock") { return 2 }
+    if ([double]$price -ge 1000) { return 2 } elseif ([double]$price -ge 1) { return 4 } else { return 6 }
 }
 
 function Get-CryptoPrice($sym) {
@@ -102,6 +99,26 @@ function Get-Price($sym, $atyp) {
     try {
         if ($atyp -eq "crypto") { return Get-CryptoPrice $sym } else { return Get-StockPrice $sym }
     } catch { return 0.0 }
+}
+
+# Raise stop to a new level. Always verify it's higher than current before calling.
+function Raise-Stop($pos, $newStop, $qty, $atyp) {
+    $sym = $pos.symbol
+    $dp  = Get-DP $newStop $atyp
+    $newStop = [math]::Round($newStop, $dp)
+    $newLim  = [math]::Round($newStop * 0.9975, $dp)
+    if ($pos.stop_order_id) { Cancel-Order $pos.stop_order_id }
+    try {
+        $sOrd = Place-StopLimit $sym $qty $newStop $newLim $atyp
+        $pos.stop_order_id = $sOrd.id
+        $pos.stop_price    = $newStop
+        $pos.stop_lim      = $newLim
+        Write-Narr "$sym - Stop raised to $newStop (order $($sOrd.id))"
+    } catch {
+        Write-Narr "$sym - Stop raise failed: $($_.Exception.Message)"
+        $pos.stop_order_id = $null
+    }
+    return $pos
 }
 
 # ---- MAIN --------------------------------------------------------------------
@@ -132,39 +149,27 @@ foreach ($pos in $positions) {
     $sym   = $pos.symbol
     $atyp  = $pos.asset_type
     $entry = [double]$pos.entry_price
-    $dp    = if ($atyp -eq "crypto") { if ($entry -ge 1000) { 2 } elseif ($entry -ge 1) { 4 } else { 6 } } else { 2 }
+    $dp    = Get-DP $entry $atyp
 
-    # Verify position still exists in Alpaca
+    # ---- Verify position still open in Alpaca ----
     $alpPos = Get-AlpacaPosition $sym
     if (-not $alpPos) {
-        Write-Narr "$sym - Position no longer in Alpaca. Checking orders..."
-        $stopFilled = $false; $t2Filled = $false
+        Write-Narr "$sym - No longer in Alpaca, checking orders..."
+        $stopFilled = $false
         if ($pos.stop_order_id) {
             $so = Get-Order $pos.stop_order_id
             if ($so -and $so.status -eq "filled") {
                 $stopFilled = $true
                 $exitPx = [double]$so.filled_avg_price
                 $pnl    = [math]::Round(($exitPx - $entry) * [double]$so.filled_qty, 2)
-                Write-Narr "$sym - STOPPED OUT at $exitPx | PnL: $`$$pnl"
+                Write-Narr "$sym - STOPPED OUT at $exitPx | PnL: `$$pnl"
                 Log-Trade $so "smc_stop_hit"
                 $state.daily_pnl = [double]$state.daily_pnl + $pnl
                 if ($pnl -lt 0) { $state.consecutive_losses = [int]$state.consecutive_losses + 1 }
                 else { $state.consecutive_losses = 0 }
             }
         }
-        if (-not $stopFilled -and $pos.t2_order_id) {
-            $t2o = Get-Order $pos.t2_order_id
-            if ($t2o -and $t2o.status -eq "filled") {
-                $t2Filled = $true
-                $exitPx = [double]$t2o.filled_avg_price
-                Write-Narr "$sym - T2 + trail fully closed at $exitPx"
-                $state.consecutive_losses = 0
-            }
-        }
-        if (-not $stopFilled -and -not $t2Filled) {
-            Write-Narr "$sym - Position gone, status unclear. Removing from state."
-        }
-        # Cancel any remaining open orders for this symbol
+        if (-not $stopFilled) { Write-Narr "$sym - Position closed (T2/trail). Resetting loss streak." ; $state.consecutive_losses = 0 }
         foreach ($oid in @($pos.stop_order_id, $pos.t1_order_id, $pos.t2_order_id) | Where-Object { $_ }) {
             Cancel-Order $oid
         }
@@ -172,48 +177,46 @@ foreach ($pos in $positions) {
         continue
     }
 
-    $curQty = [double]$alpPos.qty
-    $price  = Get-Price $sym $atyp
-    if ($price -le 0) { $updatedPositions += $pos; continue }
+    $curQty   = [double]$alpPos.qty
+    $price    = Get-Price $sym $atyp
+    if ($price -le 0) { Write-Narr "$sym - Could not get price, skipping"; $updatedPositions += $pos; continue }
 
-    $stopDist = [math]::Abs($entry - [double]$pos.stop_price)
-    $phase    = $pos.phase
+    # R-unit derived from T1: T1 = entry + 2R, so R = (T1 - entry) / 2
+    $stopR    = ([double]$pos.t1_price - $entry) / 2.0
     $t1Fired  = [bool]$pos.t1_fired
     $t2Fired  = [bool]$pos.t2_fired
+    $curStop  = [double]$pos.stop_price
+    $currentR = if ($stopR -gt 0) { ($price - $entry) / $stopR } else { 0 }
+    $profitPct = [math]::Round(($price - $entry) / $entry * 100, 2)
 
-    Write-Narr "$sym | price=$([math]::Round($price,$dp)) entry=$entry stop=$($pos.stop_price) T1=$($pos.t1_price) T2=$($pos.t2_price) phase=$phase"
+    Write-Narr "$sym | price=$([math]::Round($price,$dp)) entry=$entry curR=$([math]::Round($currentR,2)) stop=$curStop phase=$($pos.phase)"
 
     # ---- T1 fill check ----
     if (-not $t1Fired -and $pos.t1_order_id) {
         $t1Ord = Get-Order $pos.t1_order_id
         if ($t1Ord -and $t1Ord.status -eq "filled") {
-            Write-Narr "$sym - T1 FILLED at $([double]$t1Ord.filled_avg_price)! Moving stop to breakeven."
+            Write-Narr "$sym - T1 FILLED at $([double]$t1Ord.filled_avg_price)!"
             $t1Fired = $true; $pos.t1_fired = $true; $pos.phase = "t1_fired"
+            Log-Trade $t1Ord "smc_t1_fill"
 
-            # Cancel old stop and replace with BE stop on remaining qty
-            if ($pos.stop_order_id) { Cancel-Order $pos.stop_order_id }
-            $bePrice = $pos.breakeven_price
-            $beQty   = $curQty
-            $beLim   = if ($pos.direction -eq "LONG") {
-                [math]::Round([double]$bePrice * 0.9975, $dp)
-            } else { [math]::Round([double]$bePrice * 1.0025, $dp) }
-
+            # Cancel old stop, replace with BE stop on remaining qty
+            $bePrice  = [math]::Round($entry, $dp)
+            $beLim    = [math]::Round($bePrice * 0.9975, $dp)
+            $remaining = $curQty
+            if ($pos.stop_order_id) { Cancel-Order $pos.stop_order_id; $pos.stop_order_id = $null }
             try {
-                $newStop = Place-StopLimit $sym $beQty $bePrice $beLim $atyp
-                $pos.stop_order_id = $newStop.id
-                $pos.stop_price    = $bePrice
-                $pos.stop_lim      = $beLim
+                $newStop = Place-StopLimit $sym $remaining $bePrice $beLim $atyp
+                $pos.stop_order_id = $newStop.id; $pos.stop_price = $bePrice; $pos.stop_lim = $beLim
                 $pos.at_breakeven  = $true
-                Write-Narr "$sym - Breakeven stop at $bePrice for $beQty (order $($newStop.id))"
+                Write-Narr "$sym - BE stop at $bePrice for $remaining (order $($newStop.id))"
             } catch { Write-Narr "$sym - BE stop failed: $($_.Exception.Message)" }
 
             # Place T2 limit
             if (-not $pos.t2_order_id) {
                 try {
-                    $t2Qty = [double]$pos.t2_qty
-                    $t2Ord = Place-LimitSell $sym $t2Qty ([double]$pos.t2_price) $atyp
+                    $t2Ord = Place-LimitSell $sym ([double]$pos.t2_qty) ([double]$pos.t2_price) $atyp
                     $pos.t2_order_id = $t2Ord.id
-                    Write-Narr "$sym - T2 limit at $($pos.t2_price) for $t2Qty (order $($t2Ord.id))"
+                    Write-Narr "$sym - T2 limit at $($pos.t2_price) for $($pos.t2_qty) (order $($t2Ord.id))"
                 } catch { Write-Narr "$sym - T2 placement failed: $($_.Exception.Message)" }
             }
         }
@@ -223,67 +226,76 @@ foreach ($pos in $positions) {
     if ($t1Fired -and -not $t2Fired -and $pos.t2_order_id) {
         $t2Ord = Get-Order $pos.t2_order_id
         if ($t2Ord -and $t2Ord.status -eq "filled") {
-            Write-Narr "$sym - T2 FILLED at $([double]$t2Ord.filled_avg_price)! Trailing $([double]$pos.trail_qty) shares with $TRAIL_PCT% stop."
+            Write-Narr "$sym - T2 FILLED at $([double]$t2Ord.filled_avg_price)! Moving to trail phase."
             $t2Fired = $true; $pos.t2_fired = $true; $pos.phase = "trailing"
-            if ($pos.stop_order_id) { Cancel-Order $pos.stop_order_id; $pos.stop_order_id = $null }
+            Log-Trade $t2Ord "smc_t2_fill"
 
-            # Set initial trailing stop
-            $trailStop = [math]::Round($price * (1 - $TRAIL_PCT / 100), $dp)
+            # Cancel existing stop and start ATR-safe trail on remaining qty
+            if ($pos.stop_order_id) { Cancel-Order $pos.stop_order_id; $pos.stop_order_id = $null }
+            $trailPct  = if ($atyp -eq "crypto") { $TRAIL_PCT_CRYPTO } else { $TRAIL_PCT_STOCK }
+            $trailStop = [math]::Round($price * (1 - $trailPct / 100), $dp)
             $trailLim  = [math]::Round($trailStop * 0.9975, $dp)
-            $trailQty  = [double]$pos.trail_qty
+            $trailQty  = $curQty
             try {
                 $tOrd = Place-StopLimit $sym $trailQty $trailStop $trailLim $atyp
-                $pos.stop_order_id = $tOrd.id
-                $pos.stop_price    = $trailStop
+                $pos.stop_order_id = $tOrd.id; $pos.stop_price = $trailStop; $pos.stop_lim = $trailLim
                 $pos.trail_high    = $price
-                Write-Narr "$sym - Trail stop at $trailStop for $trailQty (order $($tOrd.id))"
+                Write-Narr "$sym - Trail stop at $trailStop ($trailPct%) for $trailQty (order $($tOrd.id))"
             } catch { Write-Narr "$sym - Trail stop failed: $($_.Exception.Message)" }
         }
     }
 
-    # ---- Trailing stop update ----
+    # ---- Progressive stop ladder (BEFORE T1 fires) ----
+    if (-not $t1Fired) {
+        # 1.5R milestone: move stop to entry + 0.5R (locks in 0.5R profit even if T1 pulls back)
+        $target15R = $entry + $stopR * 1.5
+        $stop05R   = $entry + $stopR * 0.5
+        if ($currentR -ge 1.5 -and $curStop -lt $stop05R - 0.0001) {
+            Write-Narr "$sym - Price at $([math]::Round($currentR,2))R. Raising stop to +0.5R ($([math]::Round($stop05R,$dp)))"
+            $pos = Raise-Stop $pos $stop05R $curQty $atyp
+            $curStop = [double]$pos.stop_price
+        }
+        # 1R milestone: move stop to breakeven
+        elseif ($currentR -ge 1.0 -and -not [bool]$pos.at_breakeven -and $curStop -lt $entry - 0.0001) {
+            Write-Narr "$sym - Price at 1R. Moving stop to breakeven ($([math]::Round($entry,$dp)))"
+            $pos = Raise-Stop $pos $entry $curQty $atyp
+            $pos.at_breakeven = $true
+            $curStop = [double]$pos.stop_price
+        }
+    }
+
+    # ---- Progressive stop ladder (AFTER T1, before T2) ----
+    if ($t1Fired -and -not $t2Fired) {
+        # 2.5R milestone: move stop to +1R (guaranteed 1R profit on remaining after T1 banked 50%)
+        $stop1R = $entry + $stopR * 1.0
+        if ($currentR -ge 2.5 -and $curStop -lt $stop1R - 0.0001) {
+            Write-Narr "$sym - Price at $([math]::Round($currentR,2))R. Raising stop to +1R ($([math]::Round($stop1R,$dp)))"
+            $pos = Raise-Stop $pos $stop1R $curQty $atyp
+            $curStop = [double]$pos.stop_price
+        }
+    }
+
+    # ---- Trailing phase: raise stop whenever price makes new high ----
     if ($t2Fired -and $pos.phase -eq "trailing") {
         $trailHigh = if ($pos.trail_high) { [double]$pos.trail_high } else { $price }
-        if ($price -gt $trailHigh) {
-            $newTrailStop = [math]::Round($price * (1 - $TRAIL_PCT / 100), $dp)
-            if ($newTrailStop -gt [double]$pos.stop_price) {
-                Write-Narr "$sym - Trail: price=$([math]::Round($price,$dp)) new high, updating stop $($pos.stop_price) -> $newTrailStop"
-                if ($pos.stop_order_id) { Cancel-Order $pos.stop_order_id }
-                $newLim  = [math]::Round($newTrailStop * 0.9975, $dp)
-                $trailQty = [double]$pos.trail_qty
-                try {
-                    $tOrd = Place-StopLimit $sym $trailQty $newTrailStop $newLim $atyp
-                    $pos.stop_order_id = $tOrd.id
-                    $pos.stop_price    = $newTrailStop
-                    $pos.trail_high    = $price
-                    Write-Narr "$sym - Trail stop updated to $newTrailStop (order $($tOrd.id))"
-                } catch { Write-Narr "$sym - Trail update failed: $($_.Exception.Message)" }
+        $trailPct  = if ($atyp -eq "crypto") { $TRAIL_PCT_CRYPTO } else { $TRAIL_PCT_STOCK }
+        if ($price -gt $trailHigh + 0.0001) {
+            $newTrailStop = [math]::Round($price * (1 - $trailPct / 100), $dp)
+            if ($newTrailStop -gt $curStop + 0.0001) {
+                Write-Narr "$sym - New high $([math]::Round($price,$dp)) (+$profitPct%). Trailing stop $curStop -> $newTrailStop"
+                $pos = Raise-Stop $pos $newTrailStop $curQty $atyp
+                $pos.trail_high = $price
             }
         }
-    }
-
-    # ---- Move to breakeven check (1R threshold, before T1) ----
-    if (-not $t1Fired -and -not ([bool]$pos.at_breakeven) -and $stopDist -gt 0) {
-        $r1Target = $entry + $stopDist * 1.0
-        if ($price -ge $r1Target) {
-            Write-Narr "$sym - Price at 1R ($([math]::Round($price,$dp))>=$([math]::Round($r1Target,$dp))). Checking T1 fill..."
-            # T1 limit order should fill on its own. Just flag readiness.
-        }
-    }
-
-    # ---- Invalidation check: close below stop manually if stop order missed ----
-    if ($pos.direction -eq "LONG" -and $price -lt ([double]$pos.stop_price * 0.995)) {
-        Write-Narr "$sym - PRICE BELOW STOP ($([math]::Round($price,$dp)) < $($pos.stop_price)) - invalidation!"
-        # Stop order should have caught this. Log for review.
     }
 
     $updatedPositions += $pos
 }
 
-# Rebuild state positions (keep non-SMC entries too)
-$otherPositions = @($state.positions | Where-Object { $_.managed_mode -ne "smc" })
+# Rebuild positions (preserve non-SMC entries)
+$otherPositions  = @($state.positions | Where-Object { $_.managed_mode -ne "smc" })
 $state.positions = @($otherPositions) + @($updatedPositions)
 Save-State $state
 
-if ($removedCount -gt 0) { Write-Narr "$removedCount position(s) removed from state." }
+if ($removedCount -gt 0) { Write-Narr "$removedCount position(s) closed and removed." }
 Write-Narr "=== SMC MANAGE DONE ==="
