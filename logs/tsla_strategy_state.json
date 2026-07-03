@@ -1,0 +1,9 @@
+﻿{
+    "entry_price":  391.611818,
+    "rung1_fired":  false,
+    "rung2_fired":  false,
+    "rung3_fired":  false,
+    "protective_type":  "none",
+    "protective_order_id":  null,
+    "strategy_closed":  false
+}

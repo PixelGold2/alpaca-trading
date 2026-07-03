@@ -1,0 +1,41 @@
+name: Trading Loop
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: trading-tick
+  cancel-in-progress: false
+
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Pull latest state
+        run: git pull --rebase origin main || true
+
+      - name: Run trading tick
+        shell: pwsh
+        env:
+          APCA_API_KEY_ID: ${{ secrets.APCA_API_KEY_ID }}
+          APCA_API_SECRET_KEY: ${{ secrets.APCA_API_SECRET_KEY }}
+          APCA_API_BASE_URL: ${{ secrets.APCA_API_BASE_URL }}
+        run: pwsh -ExecutionPolicy Bypass -NonInteractive -File scripts/tick.ps1
+
+      - name: Save state to repo
+        run: |
+          git config user.name "trading-bot"
+          git config user.email "bot@alpaca.local"
+          git add logs/
+          git diff --staged --quiet || git commit -m "state: $(date -u '+%H:%M')"
+          git push || (git pull --rebase origin main && git push)
