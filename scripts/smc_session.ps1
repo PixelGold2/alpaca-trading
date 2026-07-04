@@ -1,6 +1,6 @@
 # smc_session.ps1 - SMC institutional strategy entry scanner.
 # Scans crypto (24/7) and stocks (market hours). Only takes A- or better (score >= 84).
-# Max 3 simultaneous positions. Risk 0.7% per trade. RR >= 2.0 required.
+# Max 3 simultaneous positions. Risk 2% per trade. RR >= 2.0 required.
 
 . "$PSScriptRoot\..\config.ps1"
 
@@ -12,8 +12,8 @@ $CRYPTO_PAIRS = @("BTC/USD","ETH/USD","SOL/USD","XRP/USD")
 $STOCK_PAIRS  = @("SPY","QQQ","DIA","AAPL","NVDA","MSFT","TSLA","META","AMZN","GOOGL")
 
 $MAX_POSITIONS = 3
-$RISK_PCT      = 0.007   # 0.7% equity risk per trade
-$MAX_POS_PCT   = 0.12    # 12% equity max per position
+$RISK_PCT      = 0.02    # 2% equity risk per trade
+$MAX_POS_PCT   = 0.30    # 30% equity max per position
 $MIN_GRADE     = 80      # A- scalp threshold
 $T1_PCT        = 0.50
 $T2_PCT        = 0.30
