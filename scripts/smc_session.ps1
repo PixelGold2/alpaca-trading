@@ -38,7 +38,7 @@ $STOCK_PAIRS  = @(
 $MAX_POSITIONS = 3
 $RISK_PCT      = 0.02    # 2% equity risk per trade
 $MAX_POS_PCT   = 0.30    # 30% equity max per position
-$MIN_GRADE     = 80      # A- scalp threshold
+$MIN_GRADE     = 70      # B+ scalp threshold
 $T1_PCT        = 0.50
 $T2_PCT        = 0.30
 
