@@ -472,7 +472,7 @@ try {
     elseif  ($score -ge 65) { $grade = "B"  }
     elseif  ($score -ge 55) { $grade = "C"  }
     else                    { $grade = "F"  }
-    $tradeable = $score -ge 80
+    $tradeable = $score -ge 70
 
     $limFactor = if ($direction -eq "LONG") { 0.9975 } else { 1.0025 }
     $stopLim   = [math]::Round($stopPrice * $limFactor, $dp)
@@ -534,7 +534,7 @@ try {
     }
 
     if (-not $tradeable) {
-        $result["reason"] = "Score $score ($grade) - below scalp threshold (80)"
+        $result["reason"] = "Score $score ($grade) - below scalp threshold (70)"
     }
 
     $result | ConvertTo-Json -Depth 5
