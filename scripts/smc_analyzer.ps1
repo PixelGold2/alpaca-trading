@@ -241,14 +241,15 @@ function Detect-CandlePattern($bars) {
     return "NONE"
 }
 
-# ---- MAIN ANALYSIS (30min entry / 1H intermediate / 4H macro) ----------------
+# ---- MAIN ANALYSIS (4H macro / 1H intermediate / 30min setup / 15min confirmation) ----
 
 try {
     $h4macro = Get-Bars $Symbol "4Hour" 50
     $h1      = Get-Bars $Symbol "1Hour" 72
     $m30     = Get-Bars $Symbol "30Min" 100
+    $m15     = Get-Bars $Symbol "15Min" 100
 
-    if ($h4macro.Count -lt 20 -or $h1.Count -lt 24 -or $m30.Count -lt 30) {
+    if ($h4macro.Count -lt 20 -or $h1.Count -lt 24 -or $m30.Count -lt 30 -or $m15.Count -lt 20) {
         @{ signal="NO_TRADE"; reason="INSUFFICIENT_DATA"; symbol=$Symbol; grade="F" } | ConvertTo-Json; exit
     }
 
@@ -272,7 +273,7 @@ try {
     $h1Ema50  = if ($h1Close.Count -ge 52) { (Calc-EMA $h1Close 50)[-1] } else { $h1Ema20 }
     $h1Rsi    = Calc-RSI $h1Close 14
 
-    # ---- 15MIN ENTRY ----
+    # ---- 30MIN SETUP ----
     $m30Close  = $m30 | ForEach-Object { [double]$_.c }
     $m30Swings = Find-Swings $m30 3
     $m30Struct = Get-Structure $m30Swings
@@ -286,18 +287,27 @@ try {
     $m30AvgVol = ($m30Vols | Measure-Object -Sum).Sum / $m30Vols.Count
     $m30VolR   = if ($m30AvgVol -gt 0) { [double]$m30[-1].v / $m30AvgVol } else { 1.0 }
 
-    # Order blocks + FVGs on 30min (tight entry zones)
     $m30BullOBs = Find-OrderBlocks $m30 "bullish" $m30Atr
     $m30BearOBs = Find-OrderBlocks $m30 "bearish" $m30Atr
     $m30BullFVG = Find-FVG $m30 "bullish"
     $m30BearFVG = Find-FVG $m30 "bearish"
     $candlePat  = Detect-CandlePattern $m30
 
-    # ---- DIRECTION BIAS ----
+    # ---- 15MIN CONFIRMATION ----
+    $m15Close     = $m15 | ForEach-Object { [double]$_.c }
+    $m15Swings    = Find-Swings $m15 3
+    $m15Struct    = Get-Structure $m15Swings
+    $m15BOS       = Detect-BOS $m15 $m15Swings
+    $m15Macd      = Calc-MACD $m15Close
+    $m15Rsi       = Calc-RSI $m15Close 14
+    $m15CandlePat = Detect-CandlePattern $m15
+
+    # ---- DIRECTION BIAS (4H weighted most, 15min as final tiebreaker) ----
     $bullSignals = 0; $bearSignals = 0
     if ($h4Struct -eq "BULLISH") { $bullSignals += 2 } elseif ($h4Struct -eq "BEARISH") { $bearSignals += 2 }
     if ($h1Struct -eq "BULLISH") { $bullSignals++ }    elseif ($h1Struct -eq "BEARISH") { $bearSignals++ }
     if ($m30Struct -eq "BULLISH") { $bullSignals++ }   elseif ($m30Struct -eq "BEARISH") { $bearSignals++ }
+    if ($m15Struct -eq "BULLISH") { $bullSignals++ }   elseif ($m15Struct -eq "BEARISH") { $bearSignals++ }
     if ($price -gt $h4Ema50)  { $bullSignals++ } else { $bearSignals++ }
     if ($h4Macd -and $h4Macd.bullish) { $bullSignals++ } elseif ($h4Macd) { $bearSignals++ }
 
@@ -408,12 +418,11 @@ try {
     if ($liqGrab) { $score += 8; $for += "30min liquidity grab / stop hunt" }
     else { $against += "No recent liquidity grab" }
 
-    # Candle pattern on 30min (7pts)
+    # 30min candle pattern (5pts)
     $bullPat = @("BULLISH_ENGULF","HAMMER")
     $bearPat = @("BEARISH_ENGULF","SHOOTING_STAR")
-    if ($isBull  -and $candlePat -in $bullPat) { $score += 7; $for += "30min candle: $candlePat" }
-    elseif (-not $isBull -and $candlePat -in $bearPat) { $score += 7; $for += "30min candle: $candlePat" }
-    else { $against += "No confirming candle pattern" }
+    if ($isBull  -and $candlePat -in $bullPat) { $score += 5; $for += "30min candle: $candlePat" }
+    elseif (-not $isBull -and $candlePat -in $bearPat) { $score += 5; $for += "30min candle: $candlePat" }
 
     # Momentum (10pts)
     if ($m30Macd) {
@@ -429,6 +438,26 @@ try {
     # Volume (5pts)
     if ($m30VolR -ge 1.2) { $score += 5; $for += "Volume $([math]::Round($m30VolR,1))x avg" }
     elseif ($m30VolR -lt 0.6) { $against += "Low volume ($([math]::Round($m30VolR,1))x avg)" }
+
+    # ---- 15MIN CONFIRMATION (15pts total) ----
+    # Structure alignment (5pts)
+    $m15Target = if ($isBull) { "BULLISH" } else { "BEARISH" }
+    if ($m15Struct -eq $m15Target) {
+        $score += 5; $for += "15min structure confirmed ($m15Struct)"
+    } else { $against += "15min structure not aligned ($m15Struct)" }
+
+    # MACD alignment (5pts — cross is bonus)
+    if ($m15Macd) {
+        if (($isBull -and $m15Macd.bullish) -or (-not $isBull -and -not $m15Macd.bullish)) {
+            if ($m15Macd.cross) { $score += 5; $for += "15min MACD crossover" }
+            else                { $score += 3; $for += "15min MACD aligned" }
+        } else { $against += "15min MACD opposing" }
+    }
+
+    # Candle pattern on 15min (5pts — more timely than 30min)
+    if ($isBull  -and $m15CandlePat -in $bullPat) { $score += 5; $for += "15min candle: $m15CandlePat" }
+    elseif (-not $isBull -and $m15CandlePat -in $bearPat) { $score += 5; $for += "15min candle: $m15CandlePat" }
+    else { $against += "No 15min confirming candle ($m15CandlePat)" }
 
     # RR bonus
     if ($rr -ge 2.5) { $score += 5; $for += "RR $rr" }
@@ -473,7 +502,7 @@ try {
         grade           = $grade
         signal          = $(if ($tradeable) { "TRADE" } else { "NO_TRADE" })
         setup           = $setup
-        trend           = "$h4Struct (4H) / $h1Struct (1H) / $m30Struct (30m)"
+        trend           = "$h4Struct (4H) / $h1Struct (1H) / $m30Struct (30m) / $m15Struct (15m)"
         price           = $price
         entry           = $price
         stop            = $stopPrice
@@ -489,11 +518,16 @@ try {
         reasons_against = $against
         invalidation    = $invalidation
         management      = $mgmtPlan
-        m15_rsi         = $m30Rsi
+        m30_rsi         = $m30Rsi
+        m30_adx         = $m30Adx
+        m30_vol_ratio   = [math]::Round($m30VolR, 2)
+        m30_candle      = $candlePat
+        m15_rsi         = $m15Rsi
+        m15_macd_bull   = if ($m15Macd) { $m15Macd.bullish } else { $null }
+        m15_macd_cross  = if ($m15Macd) { $m15Macd.cross }  else { $null }
+        m15_candle      = $m15CandlePat
+        m15_structure   = $m15Struct
         h1_rsi          = $h1Rsi
-        m15_adx         = $m30Adx
-        m15_vol_ratio   = [math]::Round($m30VolR, 2)
-        candle_pattern  = $candlePat
         at_ob           = $atOB
         at_fvg          = $atFVG
         liq_grab        = $liqGrab
