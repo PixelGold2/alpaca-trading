@@ -15,7 +15,25 @@ $CRYPTO_PAIRS = @(
     "RENDER/USD","SHIB/USD","SOL/USD","SUSHI/USD","TRUMP/USD","UNI/USD",
     "WIF/USD","XRP/USD","XTZ/USD","YFI/USD"
 )
-$STOCK_PAIRS  = @("SPY","QQQ","DIA","AAPL","NVDA","MSFT","TSLA","META","AMZN","GOOGL")
+# Indices, sector ETFs, and large-cap stocks — scanned during pre-market + regular hours
+$STOCK_PAIRS  = @(
+    # Major indices
+    "SPY","QQQ","DIA","IWM",
+    # Sector ETFs
+    "XLK","XLF","XLE","XLV","XLI","XLY","XLC",
+    # Commodities / macro
+    "GLD","SLV","TLT",
+    # Mega-cap tech
+    "AAPL","NVDA","MSFT","TSLA","META","AMZN","GOOGL","NFLX","AMD","AVGO","CRM",
+    # Finance
+    "JPM","GS","BAC","MS","V","MA",
+    # Energy
+    "XOM","CVX",
+    # Other large-cap
+    "WMT","COST","JNJ","ABBV","UNH",
+    # High-vol / crypto-adjacent
+    "COIN","MSTR","PLTR","UBER","SNOW"
+)
 
 $MAX_POSITIONS = 3
 $RISK_PCT      = 0.02    # 2% equity risk per trade
@@ -79,10 +97,18 @@ function TruncQty($qty, $atyp) {
 }
 
 # ---- LONG order helpers ----
-function Place-MarketBuy($sym, $qty, $atyp) {
-    $q   = TruncQty $qty $atyp
-    $tif = if ($atyp -eq "crypto") { "gtc" } else { "day" }
-    $body = @{ symbol=$sym; qty="$q"; side="buy"; type="market"; time_in_force=$tif } | ConvertTo-Json
+# Extended-hours stocks use limit orders; crypto and regular session use market orders.
+function Place-MarketBuy($sym, $qty, $atyp, $extended = $false) {
+    $q = TruncQty $qty $atyp
+    if ($extended -and $atyp -eq "stock") {
+        # Pre/after-market: limit buy slightly above ask to ensure fill
+        $quote = Get-Quote $sym $atyp
+        $lim   = [math]::Round($quote * 1.002, 2)
+        $body  = @{ symbol=$sym; qty="$q"; side="buy"; type="limit"; limit_price=$lim; time_in_force="day"; extended_hours=$true } | ConvertTo-Json
+    } else {
+        $tif  = if ($atyp -eq "crypto") { "gtc" } else { "day" }
+        $body = @{ symbol=$sym; qty="$q"; side="buy"; type="market"; time_in_force=$tif } | ConvertTo-Json
+    }
     $o = Invoke-RestMethod -Uri "$($env:APCA_API_BASE_URL)/v2/orders" -Method Post -Headers $alpacaHeaders -Body $body
     Start-Sleep -Seconds 4
     $o = Invoke-RestMethod -Uri "$($env:APCA_API_BASE_URL)/v2/orders/$($o.id)" -Method Get -Headers $alpacaHeaders
@@ -107,10 +133,16 @@ function Place-LimitSell($sym, $qty, $lim, $atyp) {
 }
 
 # ---- SHORT order helpers ----
-function Place-MarketSell($sym, $qty, $atyp) {
-    $q   = TruncQty $qty $atyp
-    $tif = if ($atyp -eq "crypto") { "gtc" } else { "day" }
-    $body = @{ symbol=$sym; qty="$q"; side="sell"; type="market"; time_in_force=$tif } | ConvertTo-Json
+function Place-MarketSell($sym, $qty, $atyp, $extended = $false) {
+    $q = TruncQty $qty $atyp
+    if ($extended -and $atyp -eq "stock") {
+        $quote = Get-Quote $sym $atyp
+        $lim   = [math]::Round($quote * 0.998, 2)
+        $body  = @{ symbol=$sym; qty="$q"; side="sell"; type="limit"; limit_price=$lim; time_in_force="day"; extended_hours=$true } | ConvertTo-Json
+    } else {
+        $tif  = if ($atyp -eq "crypto") { "gtc" } else { "day" }
+        $body = @{ symbol=$sym; qty="$q"; side="sell"; type="market"; time_in_force=$tif } | ConvertTo-Json
+    }
     $o = Invoke-RestMethod -Uri "$($env:APCA_API_BASE_URL)/v2/orders" -Method Post -Headers $alpacaHeaders -Body $body
     Start-Sleep -Seconds 4
     $o = Invoke-RestMethod -Uri "$($env:APCA_API_BASE_URL)/v2/orders/$($o.id)" -Method Get -Headers $alpacaHeaders
@@ -132,6 +164,20 @@ function Place-LimitBuy($sym, $qty, $lim, $atyp) {
     $body = @{ symbol=$sym; qty="$q"; side="buy"; type="limit"; limit_price=[math]::Round($lim,$dp); time_in_force="gtc" } | ConvertTo-Json
     $o = Invoke-RestMethod -Uri "$($env:APCA_API_BASE_URL)/v2/orders" -Method Post -Headers $alpacaHeaders -Body $body
     Log-Trade $o "smc_short_t1"; return $o
+}
+
+function Get-Quote($sym, $atyp) {
+    try {
+        if ($atyp -eq "crypto") {
+            $enc = [uri]::EscapeDataString($sym)
+            $r   = Invoke-RestMethod -Uri "https://data.alpaca.markets/v1beta3/crypto/us/latest/bars?symbols=$enc" -Method Get -Headers $alpacaHeaders
+            return [double]($r.bars.PSObject.Properties[$sym].Value.c)
+        } else {
+            $enc = [uri]::EscapeDataString($sym)
+            $r   = Invoke-RestMethod -Uri "https://data.alpaca.markets/v2/stocks/trades/latest?symbols=$enc&feed=iex" -Method Get -Headers $alpacaHeaders
+            return [double]($r.trades.PSObject.Properties[$sym].Value.p)
+        }
+    } catch { return 0.0 }
 }
 
 function Get-OtherStateSymbols {
@@ -190,11 +236,17 @@ $takenSymbols = @($openPositions | ForEach-Object { $_.symbol })
 $takenSymbols += Get-OtherStateSymbols
 $takenSymbols = $takenSymbols | Select-Object -Unique
 
-$mkt = try { & "$PSScriptRoot\market_hours.ps1" } catch { [PSCustomObject]@{ IsOpen=$false } }
+$mkt = try { & "$PSScriptRoot\market_hours.ps1" } catch { [PSCustomObject]@{ IsOpen=$false; IsPreMarket=$false; IsExtended=$false } }
 
 $scanList = @()
-$CRYPTO_PAIRS | ForEach-Object { $scanList += @{ sym=$_; type="crypto" } }
-if ($mkt.IsOpen) { $STOCK_PAIRS | ForEach-Object { $scanList += @{ sym=$_; type="stock" } } }
+$CRYPTO_PAIRS | ForEach-Object { $scanList += @{ sym=$_; type="crypto"; extended=$false } }
+# Stocks: scan during pre-market AND regular session
+if ($mkt.IsOpen -or $mkt.IsPreMarket) {
+    $isExt = -not $mkt.IsOpen  # true when pre-market only
+    $STOCK_PAIRS | ForEach-Object { $scanList += @{ sym=$_; type="stock"; extended=$isExt } }
+    $sessionTag = if ($mkt.IsOpen) { "regular session" } else { "PRE-MARKET" }
+    Write-Narr "Stock session: $sessionTag"
+}
 
 Write-Narr "Scanning $($scanList.Count) symbols (min score $MIN_GRADE, LONG + SHORT)..."
 
@@ -222,6 +274,7 @@ foreach ($item in $scanList) {
 
     Write-Narr "  $sym - QUALIFIED | Grade:$($out.grade) Score:$($out.confidence) Dir:$($out.direction) RR:$($out.rr)"
     $out | Add-Member -NotePropertyName asset_type -NotePropertyValue $atyp -Force
+    $out | Add-Member -NotePropertyName extended   -NotePropertyValue $item.extended -Force
     $candidates += $out
 }
 
@@ -237,11 +290,12 @@ $entered = 0
 foreach ($c in $ranked) {
     if ($entered -ge $slots) { break }
 
-    $sym    = $c.symbol
-    $atyp   = $c.asset_type
-    $dir    = $c.direction
-    $isLong = ($dir -eq "LONG")
-    $price  = [double]$c.entry
+    $sym      = $c.symbol
+    $atyp     = $c.asset_type
+    $dir      = $c.direction
+    $isLong   = ($dir -eq "LONG")
+    $extended = [bool]$c.extended
+    $price    = [double]$c.entry
     $stop   = [double]$c.stop
     $rr     = [double]$c.rr
     $dp     = Get-DP $price $atyp
@@ -261,9 +315,9 @@ foreach ($c in $ranked) {
 
     try {
         $entryOrder = if ($isLong) {
-            Place-MarketBuy $sym $qty $atyp
+            Place-MarketBuy $sym $qty $atyp $extended
         } else {
-            Place-MarketSell $sym $qty $atyp
+            Place-MarketSell $sym $qty $atyp $extended
         }
         $fillPrice = if ([double]$entryOrder.filled_avg_price -gt 0) { [double]$entryOrder.filled_avg_price } else { $price }
         $fillQty   = if ([double]$entryOrder.filled_qty -gt 0) { [double]$entryOrder.filled_qty } else { $qty }
