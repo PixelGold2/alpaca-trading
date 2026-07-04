@@ -1,7 +1,7 @@
 # manage_smc_positions.ps1 - SMC position lifecycle manager.
-# Stop trail: stop = entry + (highestPriceSeen - entry) * 0.5
-# Example: buy $100, price hits $110 -> stop $105. Price hits $120 -> stop $110.
-# T1 sells 50% at 2R. T2 sells 30% at 3R. Remaining 20% runs until 50% trail hits.
+# LONG: stop = entry + (highestSeen - entry) * 0.5   (trail moves up)
+# SHORT: stop = entry - (entry - lowestSeen) * 0.5   (trail moves down)
+# T1 sells/covers 50% at 2R. T2 at 3R. Remaining 20% trails.
 
 . "$PSScriptRoot\..\config.ps1"
 
@@ -43,6 +43,10 @@ function Save-State($s) { $s | ConvertTo-Json -Depth 10 | Out-File $STATE_FILE -
 function TruncCrypto($qty) { return [math]::Floor([double]$qty * 1000000) / 1000000 }
 function TruncStock($qty)  { return [math]::Floor([double]$qty * 100) / 100 }
 
+function TruncQty($qty, $atyp) {
+    if ($atyp -eq "crypto") { return TruncCrypto $qty } else { return TruncStock $qty }
+}
+
 function Get-DP($price, $atyp) {
     if ($atyp -eq "stock") { return 2 }
     if ([double]$price -ge 1000) { return 2 } elseif ([double]$price -ge 1) { return 4 } else { return 6 }
@@ -65,21 +69,40 @@ function Cancel-Order($id) {
     catch {}
 }
 
-function Place-StopLimit($sym, $qty, $stop, $lim, $atyp) {
-    if ($atyp -eq "crypto") { $q = TruncCrypto $qty } else { $q = TruncStock $qty }
-    $dp   = Get-DP $stop $atyp
+# LONG stop: sell stop_limit below price
+function Place-SellStopLimit($sym, $qty, $stop, $lim, $atyp) {
+    $q  = TruncQty $qty $atyp
+    $dp = Get-DP $stop $atyp
     $body = @{ symbol=$sym; qty="$q"; side="sell"; type="stop_limit"
                stop_price=[math]::Round($stop,$dp); limit_price=[math]::Round($lim,$dp); time_in_force="gtc" } | ConvertTo-Json
-    $o    = Invoke-RestMethod -Uri "$($env:APCA_API_BASE_URL)/v2/orders" -Method Post -Headers $alpacaHeaders -Body $body
-    Log-Trade $o "smc_stop"; return $o
+    $o = Invoke-RestMethod -Uri "$($env:APCA_API_BASE_URL)/v2/orders" -Method Post -Headers $alpacaHeaders -Body $body
+    Log-Trade $o "smc_long_stop"; return $o
+}
+
+# SHORT stop: buy stop_limit above price
+function Place-BuyStopLimit($sym, $qty, $stop, $lim, $atyp) {
+    $q  = TruncQty $qty $atyp
+    $dp = Get-DP $stop $atyp
+    $body = @{ symbol=$sym; qty="$q"; side="buy"; type="stop_limit"
+               stop_price=[math]::Round($stop,$dp); limit_price=[math]::Round($lim,$dp); time_in_force="gtc" } | ConvertTo-Json
+    $o = Invoke-RestMethod -Uri "$($env:APCA_API_BASE_URL)/v2/orders" -Method Post -Headers $alpacaHeaders -Body $body
+    Log-Trade $o "smc_short_stop"; return $o
 }
 
 function Place-LimitSell($sym, $qty, $lim, $atyp) {
-    if ($atyp -eq "crypto") { $q = TruncCrypto $qty } else { $q = TruncStock $qty }
-    $dp   = Get-DP $lim $atyp
+    $q  = TruncQty $qty $atyp
+    $dp = Get-DP $lim $atyp
     $body = @{ symbol=$sym; qty="$q"; side="sell"; type="limit"; limit_price=[math]::Round($lim,$dp); time_in_force="gtc" } | ConvertTo-Json
-    $o    = Invoke-RestMethod -Uri "$($env:APCA_API_BASE_URL)/v2/orders" -Method Post -Headers $alpacaHeaders -Body $body
-    Log-Trade $o "smc_limit"; return $o
+    $o = Invoke-RestMethod -Uri "$($env:APCA_API_BASE_URL)/v2/orders" -Method Post -Headers $alpacaHeaders -Body $body
+    Log-Trade $o "smc_long_t2"; return $o
+}
+
+function Place-LimitBuy($sym, $qty, $lim, $atyp) {
+    $q  = TruncQty $qty $atyp
+    $dp = Get-DP $lim $atyp
+    $body = @{ symbol=$sym; qty="$q"; side="buy"; type="limit"; limit_price=[math]::Round($lim,$dp); time_in_force="gtc" } | ConvertTo-Json
+    $o = Invoke-RestMethod -Uri "$($env:APCA_API_BASE_URL)/v2/orders" -Method Post -Headers $alpacaHeaders -Body $body
+    Log-Trade $o "smc_short_t2"; return $o
 }
 
 function Get-Price($sym, $atyp) {
@@ -96,7 +119,7 @@ function Get-Price($sym, $atyp) {
     } catch { return 0.0 }
 }
 
-# Raise stop to newStop. Only raises, never lowers.
+# Raise LONG stop upward (tightening toward profit)
 function Raise-Stop($pos, $newStop, $qty, $atyp) {
     $sym     = $pos.symbol
     $dp      = Get-DP $newStop $atyp
@@ -104,13 +127,33 @@ function Raise-Stop($pos, $newStop, $qty, $atyp) {
     $newLim  = [math]::Round($newStop * 0.9975, $dp)
     if ($pos.stop_order_id) { Cancel-Order $pos.stop_order_id }
     try {
-        $sOrd              = Place-StopLimit $sym $qty $newStop $newLim $atyp
+        $sOrd              = Place-SellStopLimit $sym $qty $newStop $newLim $atyp
         $pos.stop_order_id = $sOrd.id
         $pos.stop_price    = $newStop
         $pos.stop_lim      = $newLim
-        Write-Narr "$sym - Stop raised to $newStop (order $($sOrd.id))"
+        Write-Narr "$sym - LONG stop raised to $newStop"
     } catch {
         Write-Narr "$sym - Stop raise failed: $($_.Exception.Message)"
+        $pos.stop_order_id = $null
+    }
+    return $pos
+}
+
+# Lower SHORT stop downward (tightening toward profit)
+function Lower-Stop($pos, $newStop, $qty, $atyp) {
+    $sym     = $pos.symbol
+    $dp      = Get-DP $newStop $atyp
+    $newStop = [math]::Round($newStop, $dp)
+    $newLim  = [math]::Round($newStop * 1.0025, $dp)
+    if ($pos.stop_order_id) { Cancel-Order $pos.stop_order_id }
+    try {
+        $sOrd              = Place-BuyStopLimit $sym $qty $newStop $newLim $atyp
+        $pos.stop_order_id = $sOrd.id
+        $pos.stop_price    = $newStop
+        $pos.stop_lim      = $newLim
+        Write-Narr "$sym - SHORT stop lowered to $newStop"
+    } catch {
+        Write-Narr "$sym - Short stop adjust failed: $($_.Exception.Message)"
         $pos.stop_order_id = $null
     }
     return $pos
@@ -140,10 +183,11 @@ $updatedPositions = @()
 $removedCount     = 0
 
 foreach ($pos in $positions) {
-    $sym   = $pos.symbol
-    $atyp  = $pos.asset_type
-    $entry = [double]$pos.entry_price
-    $dp    = Get-DP $entry $atyp
+    $sym    = $pos.symbol
+    $atyp   = $pos.asset_type
+    $entry  = [double]$pos.entry_price
+    $dp     = Get-DP $entry $atyp
+    $isLong = ($pos.direction -ne "SHORT")
 
     # ---- Verify position still open in Alpaca ----
     $alpPos = Get-AlpacaPosition $sym
@@ -153,7 +197,11 @@ foreach ($pos in $positions) {
             $so = Get-Order $pos.stop_order_id
             if ($so -and $so.status -eq "filled") {
                 $exitPx = [double]$so.filled_avg_price
-                $pnl    = [math]::Round(($exitPx - $entry) * [double]$so.filled_qty, 2)
+                $pnl    = if ($isLong) {
+                    [math]::Round(($exitPx - $entry) * [double]$so.filled_qty, 2)
+                } else {
+                    [math]::Round(($entry - $exitPx) * [double]$so.filled_qty, 2)
+                }
                 Write-Narr "$sym - STOPPED OUT at $exitPx | PnL: `$$pnl"
                 Log-Trade $so "smc_stop_hit"
                 $state.daily_pnl = [double]$state.daily_pnl + $pnl
@@ -179,16 +227,29 @@ foreach ($pos in $positions) {
     $t2Fired = [bool]$pos.t2_fired
     $curStop = [double]$pos.stop_price
 
-    # R-unit (T1 = entry + 2R, so R = (T1-entry)/2)
-    $stopR   = ([double]$pos.t1_price - $entry) / 2.0
-    $currentR = if ($stopR -gt 0) { ($price - $entry) / $stopR } else { 0 }
+    $stopR = [math]::Abs([double]$pos.t1_price - $entry) / 2.0
+    $currentR = if ($stopR -gt 0 -and $isLong) {
+        ($price - $entry) / $stopR
+    } elseif ($stopR -gt 0) {
+        ($entry - $price) / $stopR
+    } else { 0 }
 
-    # Track highest price seen for 50% trail
-    $highSeen = if ($pos.highest_price) { [double]$pos.highest_price } else { $entry }
-    if ($price -gt $highSeen) { $highSeen = $price; $pos.highest_price = $price }
+    # Track extreme price (high for LONG, low for SHORT)
+    if ($isLong) {
+        $highSeen = if ($pos.highest_price) { [double]$pos.highest_price } else { $entry }
+        if ($price -gt $highSeen) { $highSeen = $price; $pos.highest_price = $price }
+    } else {
+        $lowSeen = if ($pos.lowest_price) { [double]$pos.lowest_price } else { $entry }
+        if ($price -lt $lowSeen) { $lowSeen = $price; $pos.lowest_price = $price }
+    }
 
-    $profitPct = [math]::Round(($price - $entry) / $entry * 100, 3)
-    Write-Narr "$sym | price=$([math]::Round($price,$dp)) entry=$entry R=$([math]::Round($currentR,2)) stop=$curStop high=$([math]::Round($highSeen,$dp)) profit=$profitPct%"
+    $profitPct = if ($isLong) {
+        [math]::Round(($price - $entry) / $entry * 100, 3)
+    } else {
+        [math]::Round(($entry - $price) / $entry * 100, 3)
+    }
+    $dirTag = if ($isLong) { "LONG" } else { "SHORT" }
+    Write-Narr "$sym $dirTag | price=$([math]::Round($price,$dp)) entry=$entry R=$([math]::Round($currentR,2)) stop=$curStop profit=$profitPct%"
 
     # ---- T1 fill check (50% exit at 2R) ----
     if (-not $t1Fired -and $pos.t1_order_id) {
@@ -197,24 +258,33 @@ foreach ($pos in $positions) {
             Write-Narr "$sym - T1 FILLED at $([double]$t1Ord.filled_avg_price)! (50% exited)"
             $t1Fired = $true; $pos.t1_fired = $true; $pos.phase = "t1_fired"
             Log-Trade $t1Ord "smc_t1_fill"
-
-            # Cancel old stop, replace on remaining qty with breakeven floor
             if ($pos.stop_order_id) { Cancel-Order $pos.stop_order_id; $pos.stop_order_id = $null }
-            $beStop = [math]::Round([math]::Max($entry, $curStop), $dp)
-            $beLim  = [math]::Round($beStop * 0.9975, $dp)
+
+            # Move stop to breakeven
+            $beStop = [math]::Round($entry, $dp)
             try {
-                $sOrd = Place-StopLimit $sym $curQty $beStop $beLim $atyp
+                if ($isLong) {
+                    $beLim = [math]::Round($beStop * 0.9975, $dp)
+                    $sOrd  = Place-SellStopLimit $sym $curQty $beStop $beLim $atyp
+                } else {
+                    $beLim = [math]::Round($beStop * 1.0025, $dp)
+                    $sOrd  = Place-BuyStopLimit $sym $curQty $beStop $beLim $atyp
+                }
                 $pos.stop_order_id = $sOrd.id; $pos.stop_price = $beStop; $pos.stop_lim = $beLim
                 $curStop = $beStop
-                Write-Narr "$sym - Stop reset to $beStop for remaining $curQty (order $($sOrd.id))"
-            } catch { Write-Narr "$sym - Stop reset failed: $($_.Exception.Message)" }
+                Write-Narr "$sym - Stop moved to breakeven $beStop"
+            } catch { Write-Narr "$sym - BE stop failed: $($_.Exception.Message)" }
 
-            # Place T2 limit (30% at 3R)
+            # Place T2
             if (-not $pos.t2_order_id) {
                 try {
-                    $t2Ord = Place-LimitSell $sym ([double]$pos.t2_qty) ([double]$pos.t2_price) $atyp
+                    $t2Ord = if ($isLong) {
+                        Place-LimitSell $sym ([double]$pos.t2_qty) ([double]$pos.t2_price) $atyp
+                    } else {
+                        Place-LimitBuy $sym ([double]$pos.t2_qty) ([double]$pos.t2_price) $atyp
+                    }
                     $pos.t2_order_id = $t2Ord.id
-                    Write-Narr "$sym - T2 limit at $($pos.t2_price) for $($pos.t2_qty) (order $($t2Ord.id))"
+                    Write-Narr "$sym - T2 placed at $($pos.t2_price) for $($pos.t2_qty)"
                 } catch { Write-Narr "$sym - T2 placement failed: $($_.Exception.Message)" }
             }
         }
@@ -232,22 +302,27 @@ foreach ($pos in $positions) {
     }
 
     # ---- 50% PROFIT TRAIL ----
-    # Formula: stop = entry + (highestPriceSeen - entry) * 0.5
-    # Kicks in once price is at or above 1R (meaningful move, not noise).
-    # Minimum floor: original swing stop (before 1R), breakeven (after T1).
-    if ($stopR -gt 0 -and $highSeen -gt $entry) {
-        $halfTrail = $entry + ($highSeen - $entry) * 0.5
-        $halfTrail = [math]::Round($halfTrail, $dp)
-
-        # Floor: keep original tight stop until 1R, then lock in minimum at entry
-        $floor = if ($t1Fired) { $entry } else { $curStop }
-        $newStop = [math]::Max($floor, $halfTrail)
-
-        if ($newStop -gt $curStop + 0.0001) {
-            $gainLocked = [math]::Round(($newStop - $entry) / $entry * 100, 3)
-            Write-Narr "$sym - 50% trail: high=$([math]::Round($highSeen,$dp)) -> stop $curStop -> $newStop (locking $gainLocked% gain)"
-            $pos = Raise-Stop $pos $newStop $curQty $atyp
-            $curStop = $newStop
+    if ($stopR -gt 0) {
+        if ($isLong -and $highSeen -gt $entry) {
+            $halfTrail = [math]::Round($entry + ($highSeen - $entry) * 0.5, $dp)
+            $floor     = if ($t1Fired) { $entry } else { $curStop }
+            $newStop   = [math]::Max($floor, $halfTrail)
+            if ($newStop -gt $curStop + 0.0001) {
+                $gainLocked = [math]::Round(($newStop - $entry) / $entry * 100, 3)
+                Write-Narr "$sym - Trail: high=$([math]::Round($highSeen,$dp)) -> stop $curStop -> $newStop (+$gainLocked%)"
+                $pos = Raise-Stop $pos $newStop $curQty $atyp
+                $curStop = $newStop
+            }
+        } elseif (-not $isLong -and $lowSeen -lt $entry) {
+            $halfTrail = [math]::Round($entry - ($entry - $lowSeen) * 0.5, $dp)
+            $ceiling   = if ($t1Fired) { $entry } else { $curStop }
+            $newStop   = [math]::Min($ceiling, $halfTrail)
+            if ($newStop -lt $curStop - 0.0001) {
+                $gainLocked = [math]::Round(($entry - $newStop) / $entry * 100, 3)
+                Write-Narr "$sym - Trail: low=$([math]::Round($lowSeen,$dp)) -> stop $curStop -> $newStop (+$gainLocked%)"
+                $pos = Lower-Stop $pos $newStop $curQty $atyp
+                $curStop = $newStop
+            }
         }
     }
 
