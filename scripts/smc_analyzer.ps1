@@ -1,6 +1,6 @@
-# smc_analyzer.ps1 - Institutional SMC analyzer.
-# Evaluates Weekly/Daily/4H structure, Order Blocks, FVGs, liquidity, confirmation.
-# Outputs full trade plan + grade (only A- or above qualifies).
+# smc_analyzer.ps1 - SMC scalping analyzer.
+# Evaluates 4H macro / 1H intermediate / 15min entry. Tight stop from recent swing.
+# Outputs full trade plan + grade (score >= 80 qualifies).
 
 param(
     [Parameter(Mandatory)] [string] $Symbol,
@@ -19,6 +19,7 @@ function Get-Bars($sym, $tf, $limit) {
         "1Day"  { $limit + 10 }
         "4Hour" { [math]::Ceiling($limit / 6) + 10 }
         "1Hour" { [math]::Ceiling($limit / 7) + 5 }
+        "15Min" { [math]::Max(14, [math]::Ceiling($limit / 26) + 5) }
         default { 60 }
     }
     $start  = (Get-Date).AddDays(-$lookback).ToUniversalTime().ToString("yyyy-MM-ddT00:00:00Z")
@@ -239,279 +240,266 @@ function Detect-CandlePattern($bars) {
     return "NONE"
 }
 
-# ---- MAIN ANALYSIS ------------------------------------------------------------
+# ---- MAIN ANALYSIS (15min scalp / 1H intermediate / 4H macro) ----------------
 
 try {
-    $weekly = Get-Bars $Symbol "1Week" 26
-    $daily  = Get-Bars $Symbol "1Day"  60
-    $h4     = Get-Bars $Symbol "4Hour" 100
+    $h4macro = Get-Bars $Symbol "4Hour" 50
+    $h1      = Get-Bars $Symbol "1Hour" 72
+    $m15     = Get-Bars $Symbol "15Min" 100
 
-    if ($weekly.Count -lt 10 -or $daily.Count -lt 30 -or $h4.Count -lt 30) {
+    if ($h4macro.Count -lt 20 -or $h1.Count -lt 24 -or $m15.Count -lt 30) {
         @{ signal="NO_TRADE"; reason="INSUFFICIENT_DATA"; symbol=$Symbol; grade="F" } | ConvertTo-Json; exit
     }
 
-    $price = [double]$h4[-1].c
+    $price = [double]$m15[-1].c
+    $dp    = if ($price -ge 1000) { 2 } elseif ($price -ge 1) { 4 } else { 6 }
 
-    # ---- WEEKLY STRUCTURE ----
-    $wClose   = $weekly | ForEach-Object { [double]$_.c }
-    $wSwings  = Find-Swings $weekly 2
-    $wStruct  = Get-Structure $wSwings
-    $wEma20   = (Calc-EMA $wClose 20)[-1]
-    $wEma50   = if ($wClose.Count -ge 52) { (Calc-EMA $wClose 50)[-1] } else { $wEma20 }
-    $wBull    = $price -gt $wEma20 -and $price -gt $wEma50
-
-    # ---- DAILY STRUCTURE ----
-    $dClose   = $daily | ForEach-Object { [double]$_.c }
-    $dSwings  = Find-Swings $daily 3
-    $dStruct  = Get-Structure $dSwings
-    $dBOS     = Detect-BOS $daily $dSwings
-    $dEma20   = (Calc-EMA $dClose 20)[-1]
-    $dEma50   = if ($dClose.Count -ge 52) { (Calc-EMA $dClose 50)[-1] } else { $dEma20 }
-    $dEma200  = if ($dClose.Count -ge 202) { (Calc-EMA $dClose 200)[-1] } else { $dEma50 }
-    $dRsi     = Calc-RSI $dClose 14
-    $dAtr     = Calc-ATR $daily 14
-
-    # ---- 4H STRUCTURE + SMC ----
-    $h4Close  = $h4 | ForEach-Object { [double]$_.c }
-    $h4Swings = Find-Swings $h4 3
+    # ---- 4H MACRO TREND ----
+    $h4Close  = $h4macro | ForEach-Object { [double]$_.c }
+    $h4Swings = Find-Swings $h4macro 3
     $h4Struct = Get-Structure $h4Swings
-    $h4BOS    = Detect-BOS $h4 $h4Swings
     $h4Ema20  = (Calc-EMA $h4Close 20)[-1]
     $h4Ema50  = if ($h4Close.Count -ge 52) { (Calc-EMA $h4Close 50)[-1] } else { $h4Ema20 }
-    $h4Ema200 = if ($h4Close.Count -ge 202) { (Calc-EMA $h4Close 200)[-1] } else { $h4Ema50 }
     $h4Macd   = Calc-MACD $h4Close
-    $h4Atr    = Calc-ATR $h4 14
-    $h4Rsi    = Calc-RSI $h4Close 14
-    $h4Adx    = Calc-ADX $h4 14
-    $h4BB     = Calc-BollingerBands $h4Close 20
-    $h4Vols   = $h4[-21..-2] | ForEach-Object { [double]$_.v }
-    $h4AvgVol = ($h4Vols | Measure-Object -Sum).Sum / $h4Vols.Count
-    $h4VolR   = if ($h4AvgVol -gt 0) { [double]$h4[-1].v / $h4AvgVol } else { 1.0 }
 
-    # Order blocks and FVGs on 4H
-    $h4BullOBs = Find-OrderBlocks $h4 "bullish" $h4Atr
-    $h4BearOBs = Find-OrderBlocks $h4 "bearish" $h4Atr
-    $h4BullFVG = Find-FVG $h4 "bullish"
-    $h4BearFVG = Find-FVG $h4 "bearish"
-    $candlePat  = Detect-CandlePattern $h4
+    # ---- 1H INTERMEDIATE ----
+    $h1Close  = $h1 | ForEach-Object { [double]$_.c }
+    $h1Swings = Find-Swings $h1 3
+    $h1Struct = Get-Structure $h1Swings
+    $h1BOS    = Detect-BOS $h1 $h1Swings
+    $h1Ema20  = (Calc-EMA $h1Close 20)[-1]
+    $h1Ema50  = if ($h1Close.Count -ge 52) { (Calc-EMA $h1Close 50)[-1] } else { $h1Ema20 }
+    $h1Rsi    = Calc-RSI $h1Close 14
 
-    # ---- DETERMINE DIRECTION ----
+    # ---- 15MIN ENTRY ----
+    $m15Close  = $m15 | ForEach-Object { [double]$_.c }
+    $m15Swings = Find-Swings $m15 3
+    $m15Struct = Get-Structure $m15Swings
+    $m15BOS    = Detect-BOS $m15 $m15Swings
+    $m15Ema20  = (Calc-EMA $m15Close 20)[-1]
+    $m15Macd   = Calc-MACD $m15Close
+    $m15Atr    = Calc-ATR $m15 14
+    $m15Rsi    = Calc-RSI $m15Close 14
+    $m15Adx    = Calc-ADX $m15 14
+    $m15Vols   = $m15[-21..-2] | ForEach-Object { [double]$_.v }
+    $m15AvgVol = ($m15Vols | Measure-Object -Sum).Sum / $m15Vols.Count
+    $m15VolR   = if ($m15AvgVol -gt 0) { [double]$m15[-1].v / $m15AvgVol } else { 1.0 }
+
+    # Order blocks + FVGs on 15min (tight entry zones)
+    $m15BullOBs = Find-OrderBlocks $m15 "bullish" $m15Atr
+    $m15BearOBs = Find-OrderBlocks $m15 "bearish" $m15Atr
+    $m15BullFVG = Find-FVG $m15 "bullish"
+    $m15BearFVG = Find-FVG $m15 "bearish"
+    $candlePat  = Detect-CandlePattern $m15
+
+    # ---- DIRECTION BIAS ----
     $bullSignals = 0; $bearSignals = 0
-    if ($wStruct -eq "BULLISH") { $bullSignals++ } elseif ($wStruct -eq "BEARISH") { $bearSignals++ }
-    if ($dStruct -eq "BULLISH") { $bullSignals++ } elseif ($dStruct -eq "BEARISH") { $bearSignals++ }
-    if ($h4Struct -eq "BULLISH") { $bullSignals++ } elseif ($h4Struct -eq "BEARISH") { $bearSignals++ }
-    if ($price -gt $dEma200) { $bullSignals++ } else { $bearSignals++ }
+    if ($h4Struct -eq "BULLISH") { $bullSignals += 2 } elseif ($h4Struct -eq "BEARISH") { $bearSignals += 2 }
+    if ($h1Struct -eq "BULLISH") { $bullSignals++ }    elseif ($h1Struct -eq "BEARISH") { $bearSignals++ }
+    if ($m15Struct -eq "BULLISH") { $bullSignals++ }   elseif ($m15Struct -eq "BEARISH") { $bearSignals++ }
+    if ($price -gt $h4Ema50)  { $bullSignals++ } else { $bearSignals++ }
     if ($h4Macd -and $h4Macd.bullish) { $bullSignals++ } elseif ($h4Macd) { $bearSignals++ }
 
-    $direction = if ($bullSignals -gt $bearSignals) { "LONG" } else { "SHORT" }
     if ($bullSignals -eq $bearSignals) {
         @{ signal="NO_TRADE"; reason="No clear directional bias"; symbol=$Symbol; grade="F" } | ConvertTo-Json; exit
     }
+    $direction = if ($bullSignals -gt $bearSignals) { "LONG" } else { "SHORT" }
 
-    # ---- RSI FILTERS ----
-    if ($direction -eq "LONG"  -and $h4Rsi -gt 72) {
-        @{ signal="NO_TRADE"; reason="4H RSI overbought ($h4Rsi) for long"; symbol=$Symbol; grade="F" } | ConvertTo-Json; exit
+    # ---- RSI FILTERS (15min overbought/oversold) ----
+    if ($direction -eq "LONG"  -and $m15Rsi -gt 75) {
+        @{ signal="NO_TRADE"; reason="15min RSI overbought ($m15Rsi)"; symbol=$Symbol; grade="F" } | ConvertTo-Json; exit
     }
-    if ($direction -eq "SHORT" -and $h4Rsi -lt 28) {
-        @{ signal="NO_TRADE"; reason="4H RSI oversold ($h4Rsi) for short"; symbol=$Symbol; grade="F" } | ConvertTo-Json; exit
+    if ($direction -eq "SHORT" -and $m15Rsi -lt 25) {
+        @{ signal="NO_TRADE"; reason="15min RSI oversold ($m15Rsi)"; symbol=$Symbol; grade="F" } | ConvertTo-Json; exit
     }
 
-    # ---- STOP LOSS ----
-    $dp = if ($price -ge 1000) { 2 } elseif ($price -ge 1) { 4 } else { 6 }
-    $stopPrice = if ($direction -eq "LONG") {
-        $swingLow = if ($h4Swings.lows.Count -gt 0) { ($h4Swings.lows | Sort-Object { $_.idx })[-1].price } else { $price - $h4Atr * 2 }
-        [math]::Round([math]::Max($swingLow * 0.997, $price - $h4Atr * 2.0), $dp)
+    # ---- TIGHT STOP from recent 15min swing (scalp logic) ----
+    # Use lowest low / highest high of last 5 candles, with a small buffer
+    $recent5 = $m15[($m15.Count - 6)..($m15.Count - 2)]
+    $recentLow  = ($recent5 | ForEach-Object { [double]$_.l } | Measure-Object -Minimum).Minimum
+    $recentHigh = ($recent5 | ForEach-Object { [double]$_.h } | Measure-Object -Maximum).Maximum
+
+    if ($direction -eq "LONG") {
+        $stopPrice = [math]::Round($recentLow * 0.9992, $dp)   # 0.08% below recent low
     } else {
-        $swingHigh = if ($h4Swings.highs.Count -gt 0) { ($h4Swings.highs | Sort-Object { $_.idx })[-1].price } else { $price + $h4Atr * 2 }
-        [math]::Round([math]::Min($swingHigh * 1.003, $price + $h4Atr * 2.0), $dp)
+        $stopPrice = [math]::Round($recentHigh * 1.0008, $dp)  # 0.08% above recent high
     }
 
     $stopDist = [math]::Abs($price - $stopPrice)
-    $stopPct  = [math]::Round($stopDist / $price * 100, 2)
+    $stopPct  = [math]::Round($stopDist / $price * 100, 3)
 
-    if ($stopPct -gt 6.0) {
-        @{ signal="NO_TRADE"; reason="Stop $stopPct pct too wide (max 6 pct)"; symbol=$Symbol; grade="F" } | ConvertTo-Json; exit
+    # Enforce minimum distance (0.15%) to avoid slippage kills
+    if ($stopPct -lt 0.15) {
+        $stopPrice = if ($direction -eq "LONG") { [math]::Round($price * 0.9985, $dp) } else { [math]::Round($price * 1.0015, $dp) }
+        $stopDist  = [math]::Abs($price - $stopPrice)
+        $stopPct   = [math]::Round($stopDist / $price * 100, 3)
     }
 
-    # ---- TARGETS (minimum 2R) ----
+    # Hard max: 1.5% for scalping. Wider = skip.
+    if ($stopPct -gt 1.5) {
+        @{ signal="NO_TRADE"; reason="Stop $stopPct% too wide for scalp (max 1.5%)"; symbol=$Symbol; grade="F" } | ConvertTo-Json; exit
+    }
+
+    # ---- TARGETS ----
     $tp1 = if ($direction -eq "LONG") { [math]::Round($price + $stopDist * 2.0, $dp) } else { [math]::Round($price - $stopDist * 2.0, $dp) }
     $tp2 = if ($direction -eq "LONG") { [math]::Round($price + $stopDist * 3.0, $dp) } else { [math]::Round($price - $stopDist * 3.0, $dp) }
     $rr  = 2.0
 
-    # Check if next liquidity level provides better TP
-    $liquidityTarget = if ($direction -eq "LONG" -and $h4Swings.highs.Count -gt 0) {
-        ($h4Swings.highs | Where-Object { $_.price -gt $price } | Sort-Object { $_.price } | Select-Object -First 1).price
-    } elseif ($direction -eq "SHORT" -and $h4Swings.lows.Count -gt 0) {
-        ($h4Swings.lows | Where-Object { $_.price -lt $price } | Sort-Object { $_.price } -Descending | Select-Object -First 1).price
-    } else { $null }
-
-    if ($liquidityTarget) {
-        $liqRR = [math]::Round([math]::Abs($liquidityTarget - $price) / $stopDist, 1)
-        if ($liqRR -gt $rr) { $tp1 = [math]::Round($liquidityTarget, $dp); $rr = $liqRR }
+    # Liquidity target as TP if better RR
+    $liqTarget = $null
+    if ($direction -eq "LONG" -and $m15Swings.highs.Count -gt 0) {
+        $liqTarget = ($m15Swings.highs | Where-Object { $_.price -gt $price } | Sort-Object { $_.price } | Select-Object -First 1).price
+    } elseif ($direction -eq "SHORT" -and $m15Swings.lows.Count -gt 0) {
+        $liqTarget = ($m15Swings.lows | Where-Object { $_.price -lt $price } | Sort-Object { $_.price } -Descending | Select-Object -First 1).price
+    }
+    if ($liqTarget) {
+        $liqRR = [math]::Round([math]::Abs($liqTarget - $price) / $stopDist, 1)
+        if ($liqRR -ge 2.0 -and $liqRR -gt $rr) { $tp1 = [math]::Round($liqTarget, $dp); $rr = $liqRR }
     }
 
-    # ---- SCORING (0-100) ----
+    # ---- SCORING (scalp-calibrated, 0-100) ----
     $score = 0; $for = @(); $against = @()
+    $dirBull = "BULLISH"; $dirBear = "BEARISH"
+    $isBull  = $direction -eq "LONG"
 
-    # HTF Trend (25pts)
-    if ($wStruct -eq $direction.Replace("LONG","BULLISH").Replace("SHORT","BEARISH")) {
-        $score += 10; $for += "Weekly structure $wStruct"
-    } else { $against += "Weekly structure opposing ($wStruct)" }
+    # 4H macro trend (20pts — most weight, must trade with macro)
+    $h4Target = if ($isBull) { $dirBull } else { $dirBear }
+    if ($h4Struct -eq $h4Target) { $score += 12; $for += "4H macro trend aligned ($h4Struct)" }
+    else { $against += "4H macro opposing ($h4Struct)" }
+    if (($isBull -and $price -gt $h4Ema50) -or (-not $isBull -and $price -lt $h4Ema50)) { $score += 8; $for += "Price on right side of 4H 50 EMA" }
+    else { $against += "Price wrong side of 4H 50 EMA" }
 
-    if ($dStruct -eq $direction.Replace("LONG","BULLISH").Replace("SHORT","BEARISH")) {
-        $score += 10; $for += "Daily structure $dStruct"
-    } else { $against += "Daily structure opposing ($dStruct)" }
+    # 1H intermediate (20pts)
+    $h1Target = if ($isBull) { $dirBull } else { $dirBear }
+    if ($h1Struct -eq $h1Target) { $score += 10; $for += "1H structure aligned ($h1Struct)" }
+    else { $against += "1H structure opposing ($h1Struct)" }
+    $bosBull = if ($isBull) { "BULLISH" } else { "BEARISH" }
+    if ($h1BOS -eq $bosBull) { $score += 6; $for += "1H BOS confirmed" }
+    else { $against += "No 1H BOS" }
+    if (($isBull -and $price -gt $h1Ema20) -or (-not $isBull -and $price -lt $h1Ema20)) { $score += 4; $for += "Above/below 1H 20 EMA" }
 
-    if ($h4Struct -eq $direction.Replace("LONG","BULLISH").Replace("SHORT","BEARISH")) {
-        $score += 5; $for += "4H structure aligned"
-    } else { $against += "4H structure not aligned" }
-
-    # Market Structure confirmation (15pts)
-    if ($dBOS -eq "BULLISH" -and $direction -eq "LONG") { $score += 8; $for += "Daily BOS bullish" }
-    elseif ($dBOS -eq "BEARISH" -and $direction -eq "SHORT") { $score += 8; $for += "Daily BOS bearish" }
-    else { $against += "No daily BOS confirmation" }
-
-    if ($h4BOS -eq "BULLISH" -and $direction -eq "LONG") { $score += 7; $for += "4H BOS bullish" }
-    elseif ($h4BOS -eq "BEARISH" -and $direction -eq "SHORT") { $score += 7; $for += "4H BOS bearish" }
-
-    # Order Block (15pts)
+    # 15min entry quality — OB (20pts)
     $atOB = $false
-    if ($direction -eq "LONG" -and $h4BullOBs.Count -gt 0) {
-        $nearOB = $h4BullOBs | Where-Object { $price -ge $_.low * 0.998 -and $price -le $_.high * 1.002 }
+    if ($isBull) { $entryOBs = $m15BullOBs } else { $entryOBs = $m15BearOBs }
+    if ($entryOBs.Count -gt 0) {
+        $nearOB = $entryOBs | Where-Object { $price -ge $_.low * 0.999 -and $price -le $_.high * 1.001 }
         if ($nearOB) {
             $freshOB = @($nearOB | Where-Object { $_.fresh }).Count -gt 0
-            if ($freshOB) { $score += 15 } else { $score += 10 }
+            if ($freshOB) { $score += 20 } else { $score += 13 }
             $obFreshTag = if ($freshOB) { " (fresh)" } else { "" }
-            $atOB = $true; $for += "At 4H bullish order block$obFreshTag"
-        }
-    } elseif ($direction -eq "SHORT" -and $h4BearOBs.Count -gt 0) {
-        $nearOB = $h4BearOBs | Where-Object { $price -ge $_.low * 0.998 -and $price -le $_.high * 1.002 }
-        if ($nearOB) {
-            $freshOB = @($nearOB | Where-Object { $_.fresh }).Count -gt 0
-            if ($freshOB) { $score += 15 } else { $score += 10 }
-            $obFreshTag = if ($freshOB) { " (fresh)" } else { "" }
-            $atOB = $true; $for += "At 4H bearish order block$obFreshTag"
+            $atOB = $true; $for += "At 15min order block$obFreshTag"
         }
     }
-    if (-not $atOB) { $against += "Not at identified order block" }
+    if (-not $atOB) { $against += "Not at 15min order block" }
 
-    # FVG (8pts)
-    if ($direction -eq "LONG" -and $h4BullFVG.Count -gt 0) {
-        $nearFVG = $h4BullFVG | Where-Object { $price -ge $_.low * 0.999 -and $price -le $_.high * 1.001 }
-        if ($nearFVG) { $score += 8; $for += "Price filling bullish FVG" }
-    } elseif ($direction -eq "SHORT" -and $h4BearFVG.Count -gt 0) {
-        $nearFVG = $h4BearFVG | Where-Object { $price -ge $_.low * 0.999 -and $price -le $_.high * 1.001 }
-        if ($nearFVG) { $score += 8; $for += "Price filling bearish FVG" }
+    # 15min FVG fill (10pts)
+    $atFVG = $false
+    if ($isBull) { $entryFVGs = $m15BullFVG } else { $entryFVGs = $m15BearFVG }
+    if ($entryFVGs.Count -gt 0) {
+        $nearFVG = $entryFVGs | Where-Object { $price -ge $_.low * 0.9995 -and $price -le $_.high * 1.0005 }
+        if ($nearFVG) { $score += 10; $atFVG = $true; $for += "Filling 15min FVG" }
     }
+    if (-not $atFVG) { $against += "No 15min FVG at entry" }
 
-    # Liquidity grab (7pts)
-    $liqGrab = Detect-LiquidityGrab $h4 $h4Swings $direction.Replace("LONG","bullish").Replace("SHORT","bearish")
-    if ($liqGrab) { $score += 7; $for += "Liquidity grab / stop hunt detected" }
-    else { $against += "No liquidity grab" }
+    # Liquidity grab on 15min (8pts)
+    $liqDir  = if ($isBull) { "bullish" } else { "bearish" }
+    $liqGrab = Detect-LiquidityGrab $m15 $m15Swings $liqDir
+    if ($liqGrab) { $score += 8; $for += "15min liquidity grab / stop hunt" }
+    else { $against += "No recent liquidity grab" }
 
-    # EMA alignment (15pts)
-    if ($direction -eq "LONG") {
-        if ($price -gt $dEma200) { $score += 8; $for += "Above 200 EMA (daily)" } else { $against += "Below 200 EMA (bearish)" }
-        if ($price -gt $h4Ema50)  { $score += 4; $for += "Above 4H 50 EMA" }
-        if ($price -gt $h4Ema20)  { $score += 3; $for += "Above 4H 20 EMA" }
-    } else {
-        if ($price -lt $dEma200) { $score += 8; $for += "Below 200 EMA (daily)" } else { $against += "Above 200 EMA (bullish bias)" }
-        if ($price -lt $h4Ema50)  { $score += 4; $for += "Below 4H 50 EMA" }
-        if ($price -lt $h4Ema20)  { $score += 3; $for += "Below 4H 20 EMA" }
-    }
-
-    # Candle pattern (5pts)
+    # Candle pattern on 15min (7pts)
     $bullPat = @("BULLISH_ENGULF","HAMMER")
     $bearPat = @("BEARISH_ENGULF","SHOOTING_STAR")
-    if ($direction -eq "LONG"  -and $candlePat -in $bullPat) { $score += 5; $for += "Bullish candle pattern: $candlePat" }
-    if ($direction -eq "SHORT" -and $candlePat -in $bearPat)  { $score += 5; $for += "Bearish candle pattern: $candlePat" }
-    if ($candlePat -eq "NONE") { $against += "No clear candle confirmation" }
-
-    # Volume (5pts)
-    if ($h4VolR -ge 1.3) { $score += 5; $for += "Volume $([math]::Round($h4VolR,1))x above average" }
-    elseif ($h4VolR -lt 0.7) { $against += "Low volume ($([math]::Round($h4VolR,1))x avg)" }
+    if ($isBull  -and $candlePat -in $bullPat) { $score += 7; $for += "15min candle: $candlePat" }
+    elseif (-not $isBull -and $candlePat -in $bearPat) { $score += 7; $for += "15min candle: $candlePat" }
+    else { $against += "No confirming candle pattern" }
 
     # Momentum (10pts)
-    if ($h4Macd) {
-        if (($direction -eq "LONG" -and $h4Macd.bullish) -or ($direction -eq "SHORT" -and -not $h4Macd.bullish)) {
-            if ($h4Macd.cross) { $score += 6 } else { $score += 4 }
-            $crossTag = if ($h4Macd.cross) { "crossover " } else { "" }
-            $for += "MACD $($crossTag)aligned"
-        } else { $against += "MACD opposing direction" }
+    if ($m15Macd) {
+        if (($isBull -and $m15Macd.bullish) -or (-not $isBull -and -not $m15Macd.bullish)) {
+            if ($m15Macd.cross) { $score += 6 } else { $score += 4 }
+            $crossTag = if ($m15Macd.cross) { "crossover " } else { "" }
+            $for += "15min MACD $($crossTag)aligned"
+        } else { $against += "15min MACD opposing" }
     }
-    if ($h4Adx -ge 25) { $score += 4; $for += "ADX $h4Adx (strong trend)" }
-    elseif ($h4Adx -lt 15) { $against += "ADX $h4Adx (weak trend)" }
+    if ($m15Adx -ge 20) { $score += 4; $for += "ADX $m15Adx trending" }
+    elseif ($m15Adx -lt 15) { $against += "ADX $m15Adx weak" }
+
+    # Volume (5pts)
+    if ($m15VolR -ge 1.2) { $score += 5; $for += "Volume $([math]::Round($m15VolR,1))x avg" }
+    elseif ($m15VolR -lt 0.6) { $against += "Low volume ($([math]::Round($m15VolR,1))x avg)" }
 
     # RR bonus
-    if ($rr -ge 2.5) { $score += 5; $for += "RR $rr (strong)" }
+    if ($rr -ge 2.5) { $score += 5; $for += "RR $rr" }
     elseif ($rr -lt 2.0) { $score = 0 }
 
-    # ---- GRADE ----
-    $score   = [math]::Min(100, [math]::Max(0, $score))
-    if      ($score -ge 95) { $grade = "A+" }
-    elseif  ($score -ge 90) { $grade = "A"  }
-    elseif  ($score -ge 84) { $grade = "A-" }
-    elseif  ($score -ge 78) { $grade = "B+" }
-    elseif  ($score -ge 70) { $grade = "B"  }
-    elseif  ($score -ge 60) { $grade = "C"  }
+    # ---- GRADE (scalp thresholds) ----
+    $score = [math]::Min(100, [math]::Max(0, $score))
+    if      ($score -ge 92) { $grade = "A+" }
+    elseif  ($score -ge 87) { $grade = "A"  }
+    elseif  ($score -ge 80) { $grade = "A-" }
+    elseif  ($score -ge 73) { $grade = "B+" }
+    elseif  ($score -ge 65) { $grade = "B"  }
+    elseif  ($score -ge 55) { $grade = "C"  }
     else                    { $grade = "F"  }
-    $tradeable = $score -ge 84
+    $tradeable = $score -ge 80
 
     $limFactor = if ($direction -eq "LONG") { 0.9975 } else { 1.0025 }
     $stopLim   = [math]::Round($stopPrice * $limFactor, $dp)
     $riskPct   = $stopPct
     $rewardPct = [math]::Round($stopPct * $rr, 2)
 
-    if      ($atOB -and $liqGrab) { $setup = "Liquidity grab into Order Block" }
-    elseif  ($atOB)               { $setup = "Pullback into Order Block" }
-    elseif  ($liqGrab)            { $setup = "Liquidity grab / stop hunt" }
-    else                          { $setup = "Structure pullback" }
+    if      ($atOB -and $liqGrab) { $setup = "15min liquidity grab into OB" }
+    elseif  ($atOB -and $atFVG)   { $setup = "15min OB + FVG confluence" }
+    elseif  ($atOB)               { $setup = "15min order block pullback" }
+    elseif  ($liqGrab)            { $setup = "15min liquidity grab" }
+    else                          { $setup = "15min structure pullback" }
 
-    $mgmtPlan = "Move stop to breakeven after 1R profit ($([math]::Round($stopPct,2))%). " +
-                "Take 50% at TP1 ($tp1). Trail remaining with ATR on swing lows. " +
-                "Full exit at TP2 ($tp2) or 4H close against structure."
+    $mgmtPlan = "Stop $stopPct% away. Move to BE at 1R. Take 50% at TP1 ($tp1, +$([math]::Round($stopPct*2,2))%). " +
+                "Take 30% at TP2 ($tp2). Trail last 20% at 1.5% crypto / 0.8% stock."
 
-    $invalidation = if ($direction -eq "LONG") {
-        "4H close below $stopPrice (swing low broken)"
+    $invalidation = if ($isBull) {
+        "15min close below $stopPrice (recent low broken)"
     } else {
-        "4H close above $stopPrice (swing high broken)"
+        "15min close above $stopPrice (recent high broken)"
     }
 
     $result = [ordered]@{
-        symbol         = $Symbol
-        ticker         = $Symbol
-        direction      = $direction
-        confidence     = $score
-        grade          = $grade
-        signal         = $(if ($tradeable) { "TRADE" } else { "NO_TRADE" })
-        setup          = $setup
-        trend          = "$wStruct (W) / $dStruct (D) / $h4Struct (4H)"
-        price          = $price
-        entry          = $price
-        stop           = $stopPrice
-        stop_lim       = $stopLim
-        stop_pct       = $stopPct
-        tp1            = $tp1
-        tp2            = $tp2
-        rr             = $rr
-        risk_pct       = $riskPct
-        reward_pct     = $rewardPct
-        probability    = [math]::Min(80, [math]::Round(40 + $score * 0.4, 0))
-        reasons_for    = $for
+        symbol          = $Symbol
+        ticker          = $Symbol
+        direction       = $direction
+        confidence      = $score
+        grade           = $grade
+        signal          = $(if ($tradeable) { "TRADE" } else { "NO_TRADE" })
+        setup           = $setup
+        trend           = "$h4Struct (4H) / $h1Struct (1H) / $m15Struct (15m)"
+        price           = $price
+        entry           = $price
+        stop            = $stopPrice
+        stop_lim        = $stopLim
+        stop_pct        = $stopPct
+        tp1             = $tp1
+        tp2             = $tp2
+        rr              = $rr
+        risk_pct        = $riskPct
+        reward_pct      = $rewardPct
+        probability     = [math]::Min(80, [math]::Round(38 + $score * 0.42, 0))
+        reasons_for     = $for
         reasons_against = $against
-        invalidation   = $invalidation
-        management     = $mgmtPlan
-        daily_rsi      = $dRsi
-        h4_rsi         = $h4Rsi
-        h4_adx         = $h4Adx
-        h4_vol_ratio   = [math]::Round($h4VolR, 2)
-        candle_pattern = $candlePat
-        at_ob          = $atOB
-        liq_grab       = $liqGrab
+        invalidation    = $invalidation
+        management      = $mgmtPlan
+        m15_rsi         = $m15Rsi
+        h1_rsi          = $h1Rsi
+        m15_adx         = $m15Adx
+        m15_vol_ratio   = [math]::Round($m15VolR, 2)
+        candle_pattern  = $candlePat
+        at_ob           = $atOB
+        at_fvg          = $atFVG
+        liq_grab        = $liqGrab
     }
 
     if (-not $tradeable) {
-        $result["reason"] = "Score $score - Grade $grade below A- threshold (84)"
+        $result["reason"] = "Score $score ($grade) - below scalp threshold (80)"
     }
 
     $result | ConvertTo-Json -Depth 5

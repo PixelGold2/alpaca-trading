@@ -7,8 +7,8 @@
 $STATE_FILE      = "$PSScriptRoot\..\logs\smc_session_state.json"
 $NARR_LOG        = "$PSScriptRoot\..\logs\smc_session_log.csv"
 $TRADE_LOG       = "$PSScriptRoot\..\logs\trades_log.csv"
-$TRAIL_PCT_CRYPTO = 7.0   # trail % for crypto after T2
-$TRAIL_PCT_STOCK  = 4.0   # trail % for stocks after T2
+$TRAIL_PCT_CRYPTO = 1.5   # tight trail for scalping crypto
+$TRAIL_PCT_STOCK  = 0.8   # tight trail for scalping stocks
 
 $alpacaHeaders = @{
     "APCA-API-KEY-ID"     = $env:APCA_API_KEY_ID

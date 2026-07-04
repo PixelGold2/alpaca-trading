@@ -14,7 +14,7 @@ $STOCK_PAIRS  = @("SPY","QQQ","DIA","AAPL","NVDA","MSFT","TSLA","META","AMZN","G
 $MAX_POSITIONS = 3
 $RISK_PCT      = 0.007   # 0.7% equity risk per trade
 $MAX_POS_PCT   = 0.12    # 12% equity max per position
-$MIN_GRADE     = 84      # A- threshold
+$MIN_GRADE     = 80      # A- scalp threshold
 $T1_PCT        = 0.50
 $T2_PCT        = 0.30
 
