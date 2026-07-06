@@ -7,8 +7,8 @@ import twscrape
 TELEGRAM_BOT_TOKEN = os.environ['TELEGRAM_BOT_TOKEN']
 TELEGRAM_CHAT_ID = os.environ['TELEGRAM_CHAT_ID']
 X_USERNAME = os.environ['X_USERNAME']
-X_PASSWORD = os.environ['X_PASSWORD']
-X_EMAIL = os.environ['X_EMAIL']
+X_AUTH_TOKEN = os.environ['X_AUTH_TOKEN']
+X_CT0 = os.environ['X_CT0']
 
 STATE_FILE = 'twitter_monitor/state.json'
 
@@ -45,7 +45,8 @@ def save_state(state):
 
 async def main():
     api = twscrape.API()
-    await api.pool.add_account(X_USERNAME, X_PASSWORD, X_EMAIL, '')
+    cookies = f"auth_token={X_AUTH_TOKEN}; ct0={X_CT0}"
+    await api.pool.add_account(X_USERNAME, X_USERNAME, X_USERNAME, '', cookies=cookies)
     await api.pool.login_all()
 
     state = load_state()
