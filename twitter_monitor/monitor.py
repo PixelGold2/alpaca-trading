@@ -13,10 +13,14 @@ ACCOUNTS = {
     'FinancialJuice': 'FinancialJuice',
 }
 
-RSSHUB_INSTANCES = [
-    'https://rsshub.app',
-    'https://rss.shab.fun',
-    'https://rsshub.rssforever.com',
+# Nitter instances — tries each until one works
+NITTER_INSTANCES = [
+    'https://nitter.poast.org',
+    'https://nitter.privacydev.net',
+    'https://nitter.1d4.us',
+    'https://nitter.kavin.rocks',
+    'https://nitter.unixfox.eu',
+    'https://twiiit.com',
 ]
 
 
@@ -27,7 +31,7 @@ def send_telegram(message):
         'text': message,
         'parse_mode': 'HTML',
         'disable_web_page_preview': False,
-    })
+    }, timeout=10)
     resp.raise_for_status()
 
 
@@ -45,21 +49,25 @@ def save_state(state):
 
 
 def fetch_feed(username):
-    for base in RSSHUB_INSTANCES:
-        url = f'{base}/twitter/user/{username}'
+    for instance in NITTER_INSTANCES:
+        url = f'{instance}/{username}/rss'
         try:
+            print(f'Trying {url}')
             feed = feedparser.parse(url)
             if feed.entries:
+                print(f'Got {len(feed.entries)} entries from {instance}')
                 return feed
-        except Exception:
-            continue
+            else:
+                print(f'No entries from {instance}')
+        except Exception as e:
+            print(f'Error from {instance}: {e}')
     return None
 
 
 def check_account(username, display_name, state):
     feed = fetch_feed(username)
     if not feed or not feed.entries:
-        print(f'No entries for {username}')
+        print(f'All instances failed for {username}')
         return
 
     last_seen = state.get(username)
@@ -71,21 +79,23 @@ def check_account(username, display_name, state):
             break
         new_posts.append((entry_id, entry))
 
-    # Always update state to latest
     first_id = feed.entries[0].get('id') or feed.entries[0].get('link', '')
     state[username] = first_id
 
-    # First run: save state only, don't spam
     if last_seen is None:
-        print(f'{username}: first run, saved state')
+        print(f'{username}: first run, saved state ({len(feed.entries)} posts found)')
         return
+
+    print(f'{username}: {len(new_posts)} new posts')
 
     for entry_id, post in reversed(new_posts):
         title = post.get('title', '(no content)')
         link = post.get('link', '')
+        # Clean up nitter link to point to real X
+        link = link.replace(next((i for i in NITTER_INSTANCES if i in link), ''), 'https://x.com')
         message = f'<b>🐦 {display_name}</b>\n\n{title}\n\n<a href="{link}">View on X</a>'
         send_telegram(message)
-        print(f'Sent: {username} — {title[:60]}')
+        print(f'Sent: {title[:60]}')
 
 
 def main():
