@@ -82,13 +82,14 @@ def check_account(username, display_name, state):
     first_id = feed.entries[0].get('id') or feed.entries[0].get('link', '')
     state[username] = first_id
 
+    # First run: send only the latest post so user can verify it works
     if last_seen is None:
-        print(f'{username}: first run, saved state ({len(feed.entries)} posts found)')
-        return
+        print(f'{username}: first run, sending latest post')
+        new_posts = [(first_id, feed.entries[0])]
 
     print(f'{username}: {len(new_posts)} new posts')
 
-    for entry_id, post in reversed(new_posts):
+    for entry_id, post in new_posts:
         title = post.get('title', '(no content)')
         link = post.get('link', '')
         # Clean up nitter link to point to real X
