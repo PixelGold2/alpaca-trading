@@ -22,10 +22,19 @@ jobs:
       - name: Install dependencies
         run: pip install -r twitter_monitor/requirements.txt
 
+      - name: Cache twscrape session
+        uses: actions/cache@v4
+        with:
+          path: accounts.db
+          key: twscrape-session-v1
+
       - name: Run monitor
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          X_USERNAME: ${{ secrets.X_USERNAME }}
+          X_PASSWORD: ${{ secrets.X_PASSWORD }}
+          X_EMAIL: ${{ secrets.X_EMAIL }}
         run: python twitter_monitor/monitor.py
 
       - name: Save state back to repo
