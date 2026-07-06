@@ -1,10 +1,15 @@
-import feedparser
+import asyncio
 import json
 import os
 import requests
+import twscrape
 
 TELEGRAM_BOT_TOKEN = os.environ['TELEGRAM_BOT_TOKEN']
 TELEGRAM_CHAT_ID = os.environ['TELEGRAM_CHAT_ID']
+X_USERNAME = os.environ['X_USERNAME']
+X_PASSWORD = os.environ['X_PASSWORD']
+X_EMAIL = os.environ['X_EMAIL']
+
 STATE_FILE = 'twitter_monitor/state.json'
 
 ACCOUNTS = {
@@ -12,16 +17,6 @@ ACCOUNTS = {
     'WalterBloomberg': 'Walter Bloomberg',
     'FinancialJuice': 'FinancialJuice',
 }
-
-# Nitter instances — tries each until one works
-NITTER_INSTANCES = [
-    'https://nitter.poast.org',
-    'https://nitter.privacydev.net',
-    'https://nitter.1d4.us',
-    'https://nitter.kavin.rocks',
-    'https://nitter.unixfox.eu',
-    'https://twiiit.com',
-]
 
 
 def send_telegram(message):
@@ -48,66 +43,57 @@ def save_state(state):
         json.dump(state, f, indent=2)
 
 
-def fetch_feed(username):
-    for instance in NITTER_INSTANCES:
-        url = f'{instance}/{username}/rss'
-        try:
-            print(f'Trying {url}')
-            feed = feedparser.parse(url)
-            if feed.entries:
-                print(f'Got {len(feed.entries)} entries from {instance}')
-                return feed
-            else:
-                print(f'No entries from {instance}')
-        except Exception as e:
-            print(f'Error from {instance}: {e}')
-    return None
+async def main():
+    api = twscrape.API()
+    await api.pool.add_account(X_USERNAME, X_PASSWORD, X_EMAIL, '')
+    await api.pool.login_all()
 
-
-def check_account(username, display_name, state):
-    feed = fetch_feed(username)
-    if not feed or not feed.entries:
-        print(f'All instances failed for {username}')
-        return
-
-    last_seen = state.get(username)
-    new_posts = []
-
-    for entry in feed.entries:
-        entry_id = entry.get('id') or entry.get('link', '')
-        if entry_id == last_seen:
-            break
-        new_posts.append((entry_id, entry))
-
-    first_id = feed.entries[0].get('id') or feed.entries[0].get('link', '')
-    state[username] = first_id
-
-    # First run: send only the latest post so user can verify it works
-    if last_seen is None:
-        print(f'{username}: first run, sending latest post')
-        new_posts = [(first_id, feed.entries[0])]
-
-    print(f'{username}: {len(new_posts)} new posts')
-
-    for entry_id, post in new_posts:
-        title = post.get('title', '(no content)')
-        link = post.get('link', '')
-        # Clean up nitter link to point to real X
-        link = link.replace(next((i for i in NITTER_INSTANCES if i in link), ''), 'https://x.com')
-        message = f'<b>🐦 {display_name}</b>\n\n{title}\n\n<a href="{link}">View on X</a>'
-        send_telegram(message)
-        print(f'Sent: {title[:60]}')
-
-
-def main():
     state = load_state()
+
     for username, display_name in ACCOUNTS.items():
         try:
-            check_account(username, display_name, state)
+            user = await api.user_by_login(username)
+            if not user:
+                print(f'User not found: {username}')
+                continue
+
+            last_seen = state.get(username)
+            new_tweets = []
+
+            async for tweet in api.user_tweets(user.id, limit=10):
+                tweet_id = str(tweet.id)
+                if tweet_id == last_seen:
+                    break
+                new_tweets.append(tweet)
+
+            if not new_tweets:
+                print(f'{username}: no new tweets')
+                continue
+
+            # Always update state to latest
+            state[username] = str(new_tweets[0].id)
+
+            # First run: send only the latest post
+            if last_seen is None:
+                tweet = new_tweets[0]
+                link = f'https://x.com/{username}/status/{tweet.id}'
+                message = f'<b>\U0001f426 {display_name}</b>\n\n{tweet.rawContent}\n\n<a href="{link}">View on X</a>'
+                send_telegram(message)
+                print(f'{username}: first run, sent latest post')
+                continue
+
+            # Send new tweets oldest first
+            for tweet in reversed(new_tweets):
+                link = f'https://x.com/{username}/status/{tweet.id}'
+                message = f'<b>\U0001f426 {display_name}</b>\n\n{tweet.rawContent}\n\n<a href="{link}">View on X</a>'
+                send_telegram(message)
+                print(f'Sent: {tweet.rawContent[:60]}')
+
         except Exception as e:
             print(f'Error checking {username}: {e}')
+
     save_state(state)
 
 
 if __name__ == '__main__':
-    main()
+    asyncio.run(main())
