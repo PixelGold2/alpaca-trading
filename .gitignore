@@ -1,2 +1,4 @@
 config.ps1
 logs/*.csv
+twitter_monitor/.env
+twitter_monitor/accounts.db

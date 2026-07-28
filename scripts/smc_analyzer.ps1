@@ -325,30 +325,34 @@ try {
     }
 
     # ---- TIGHT STOP from last 2 completed 30min candles ----
-    # Only 2 candles (1 hour of range) for tight scalp entry
-    $recent2 = $m30[($m30.Count - 3)..($m30.Count - 2)]
-    $recentLow  = ($recent2 | ForEach-Object { [double]$_.l } | Measure-Object -Minimum).Minimum
-    $recentHigh = ($recent2 | ForEach-Object { [double]$_.h } | Measure-Object -Maximum).Maximum
+    # Crypto uses last 4 candles (2 hours) for a wider but still controlled stop window
+    $recentN = if ($AssetType -eq "crypto") { $m30[($m30.Count - 5)..($m30.Count - 2)] } else { $m30[($m30.Count - 3)..($m30.Count - 2)] }
+    $recentLow  = ($recentN | ForEach-Object { [double]$_.l } | Measure-Object -Minimum).Minimum
+    $recentHigh = ($recentN | ForEach-Object { [double]$_.h } | Measure-Object -Maximum).Maximum
 
+    $bufPct = if ($AssetType -eq "crypto") { 0.9985 } else { 0.9992 }   # 0.15% buffer crypto, 0.08% stocks
+    $bufPctH = if ($AssetType -eq "crypto") { 1.0015 } else { 1.0008 }
     if ($direction -eq "LONG") {
-        $stopPrice = [math]::Round($recentLow * 0.9992, $dp)   # 0.08% below recent low
+        $stopPrice = [math]::Round($recentLow * $bufPct, $dp)
     } else {
-        $stopPrice = [math]::Round($recentHigh * 1.0008, $dp)  # 0.08% above recent high
+        $stopPrice = [math]::Round($recentHigh * $bufPctH, $dp)
     }
 
     $stopDist = [math]::Abs($price - $stopPrice)
     $stopPct  = [math]::Round($stopDist / $price * 100, 3)
 
-    # Enforce minimum distance (0.1%) to avoid slippage kills
-    if ($stopPct -lt 0.1) {
-        $stopPrice = if ($direction -eq "LONG") { [math]::Round($price * 0.999, $dp) } else { [math]::Round($price * 1.001, $dp) }
+    # Enforce minimum distance to avoid slippage kills
+    $minStop = if ($AssetType -eq "crypto") { 0.15 } else { 0.1 }
+    if ($stopPct -lt $minStop) {
+        $stopPrice = if ($direction -eq "LONG") { [math]::Round($price * (1 - $minStop/100), $dp) } else { [math]::Round($price * (1 + $minStop/100), $dp) }
         $stopDist  = [math]::Abs($price - $stopPrice)
         $stopPct   = [math]::Round($stopDist / $price * 100, 3)
     }
 
-    # Hard max: 0.5% for scalping. Wider = skip.
-    if ($stopPct -gt 0.5) {
-        @{ signal="NO_TRADE"; reason="Stop $stopPct% too wide for scalp (max 0.5%)"; symbol=$Symbol; grade="F" } | ConvertTo-Json; exit
+    # Hard max: crypto allows up to 2%, stocks keep 0.5% scalp limit
+    $maxStop = if ($AssetType -eq "crypto") { 2.0 } else { 0.5 }
+    if ($stopPct -gt $maxStop) {
+        @{ signal="NO_TRADE"; reason="Stop $stopPct% too wide (max $maxStop% for $AssetType)"; symbol=$Symbol; grade="F" } | ConvertTo-Json; exit
     }
 
     # ---- TARGETS ----

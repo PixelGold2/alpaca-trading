@@ -3,6 +3,10 @@ import json
 import os
 import requests
 import twscrape
+from dotenv import load_dotenv
+
+# Load .env when running locally
+load_dotenv(os.path.join(os.path.dirname(__file__), '.env'))
 
 TELEGRAM_BOT_TOKEN = os.environ['TELEGRAM_BOT_TOKEN']
 TELEGRAM_CHAT_ID = os.environ['TELEGRAM_CHAT_ID']
@@ -61,7 +65,7 @@ async def main():
             last_seen = state.get(username)
             new_tweets = []
 
-            async for tweet in api.user_tweets(user.id, limit=10):
+            async for tweet in api.user_tweets(user.id, limit=50):
                 tweet_id = str(tweet.id)
                 if tweet_id == last_seen:
                     break

@@ -1,27 +1,33 @@
-# tv_1min_scanner.ps1 — Background 1-min SMC scanner (crypto 24/7 + stocks during market hours)
-# Calls claude -p every 90s to read TradingView LuxAlgo data and fire trades
-# Launch via: launch_scanner_bg.ps1 (runs hidden, no window)
+# tv_1min_scanner.ps1 — Background 1-min SMC scanner
+# Calls claude -p every 90s, reads TradingView LuxAlgo, fires trades.
+# Launch via: launch_scanner_bg.ps1 (hidden window)
 
-. "$PSScriptRoot\..\config.ps1"
+# Resolve base dir — works even in hidden processes where PSScriptRoot may be empty
+$BASE_DIR = if ($PSScriptRoot -and (Test-Path $PSScriptRoot)) {
+    Split-Path $PSScriptRoot -Parent
+} else {
+    "C:\Users\PC\AlpacaTrading"
+}
 
-$STATE_FILE    = "$PSScriptRoot\..\logs\tv_scanner_state.json"
-$SCAN_LOG      = "$PSScriptRoot\..\logs\tv_scanner.log"
-$TRADE_STATE   = "$PSScriptRoot\..\logs\tv_1min_state.json"
-$PID_FILE      = "$PSScriptRoot\..\logs\tv_scanner.pid"
-$WATCHLIST_FILE = "$PSScriptRoot\..\logs\tv_stock_watchlist.json"
-$SCAN_INTERVAL = 90   # seconds between scans
-$MAX_OPEN_POSITIONS = 5
+. "$BASE_DIR\config.ps1"
 
-# Write PID so launcher can kill us
-$PID | Out-File $PID_FILE -Encoding ascii
+$STATE_FILE   = "$BASE_DIR\logs\tv_scanner_state.json"
+$SCAN_LOG     = "$BASE_DIR\logs\tv_scanner.log"
+$TRADE_STATE  = "$BASE_DIR\logs\tv_1min_state.json"
+$PID_FILE     = "$BASE_DIR\logs\tv_scanner.pid"
+$TRADER       = "$BASE_DIR\scripts\tv_1min_trader.ps1"
+$SCAN_INTERVAL = 45
+$MAX_POSITIONS = 5
 
 $hdr = @{
     "APCA-API-KEY-ID"     = $env:APCA_API_KEY_ID
     "APCA-API-SECRET-KEY" = $env:APCA_API_SECRET_KEY
     "Content-Type"        = "application/json"
 }
-$BASE      = $env:APCA_API_BASE_URL
 $DATA_BASE = "https://data.alpaca.markets"
+
+# Write PID for launch_scanner_bg.ps1 to track
+"$PID" | Out-File $PID_FILE -Encoding ascii
 
 function Log($msg) {
     "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') | $msg" | Add-Content $SCAN_LOG
@@ -32,9 +38,9 @@ function Get-ScanState {
         try { return Get-Content $STATE_FILE -Raw | ConvertFrom-Json } catch {}
     }
     return [PSCustomObject]@{
-        btc_ob_demand  = "unknown"; btc_ob_supply  = "unknown"; btc_last_label = "unknown"
-        sol_ob_demand  = "unknown"; sol_ob_supply  = "unknown"; sol_last_label = "unknown"
-        stock_symbols  = @()
+        btc_ob_demand="unknown"; btc_ob_supply="unknown"; btc_last_label="unknown"
+        sol_ob_demand="unknown"; sol_ob_supply="unknown"; sol_last_label="unknown"
+        stock_symbols=@()
     }
 }
 
@@ -47,63 +53,46 @@ function Get-OpenPositionCount {
 }
 
 function Is-MarketOpen {
-    # NYSE/Nasdaq: Mon-Fri 9:30-16:00 ET (UTC-4 in summer, UTC-5 in winter)
-    $utcNow = [System.DateTime]::UtcNow
-    $et = [System.TimeZoneInfo]::ConvertTimeBySystemTimeZoneId($utcNow, "Eastern Standard Time")
-    $dow = $et.DayOfWeek
-    if ($dow -eq "Saturday" -or $dow -eq "Sunday") { return $false }
-    $open  = [System.TimeSpan]::new(9, 30, 0)
-    $close = [System.TimeSpan]::new(16, 0, 0)
-    return ($et.TimeOfDay -ge $open -and $et.TimeOfDay -lt $close)
+    $et = [System.TimeZoneInfo]::ConvertTimeBySystemTimeZoneId(
+        [System.DateTime]::UtcNow, "Eastern Standard Time")
+    if ($et.DayOfWeek -in @("Saturday","Sunday")) { return $false }
+    return ($et.TimeOfDay -ge [TimeSpan]"09:30" -and $et.TimeOfDay -lt [TimeSpan]"16:00")
 }
 
 function Is-PreMarket {
-    $utcNow = [System.DateTime]::UtcNow
-    $et = [System.TimeZoneInfo]::ConvertTimeBySystemTimeZoneId($utcNow, "Eastern Standard Time")
-    $dow = $et.DayOfWeek
-    if ($dow -eq "Saturday" -or $dow -eq "Sunday") { return $false }
-    $open  = [System.TimeSpan]::new(4, 0, 0)
-    $close = [System.TimeSpan]::new(9, 30, 0)
-    return ($et.TimeOfDay -ge $open -and $et.TimeOfDay -lt $close)
+    $et = [System.TimeZoneInfo]::ConvertTimeBySystemTimeZoneId(
+        [System.DateTime]::UtcNow, "Eastern Standard Time")
+    if ($et.DayOfWeek -in @("Saturday","Sunday")) { return $false }
+    return ($et.TimeOfDay -ge [TimeSpan]"04:00" -and $et.TimeOfDay -lt [TimeSpan]"09:30")
 }
 
 function Get-TopStocks {
-    # Screen Nasdaq/NYSE for top volume movers to scan with LuxAlgo
+    $defaultList = @("AAPL","MSFT","NVDA","TSLA","META","AMZN","GOOGL","AMD","NFLX","PLTR","COIN","SMCI","ARM","AVGO","SOFI")
     try {
-        # Get most active stocks from Alpaca's most-active snapshot
-        $snap = Invoke-RestMethod "$DATA_BASE/v2/stocks/snapshots?symbols=AAPL,MSFT,NVDA,TSLA,META,AMZN,GOOGL,AMD,NFLX,SMCI,PLTR,ARM,AVGO,TSM,ORCL,CRM,SNOW,UBER,LYFT,COIN,MARA,RIOT,HOOD,SOFI,RBLX,DKNG,PENN,MGM,WYNN,LVS&feed=iex" -Headers $hdr -ErrorAction Stop
-
-        $candidates = @()
-        foreach ($prop in $snap.PSObject.Properties) {
-            $sym   = $prop.Name
-            $data  = $prop.Value
-            $price = [double]$data.latestTrade.p
-            $prevC = [double]$data.prevDailyBar.c
-            $vol   = [double]($data.dailyBar.v)
-            if ($prevC -le 0 -or $price -le 0) { continue }
-            $chgPct = (($price - $prevC) / $prevC) * 100
-            $dolVol = $price * $vol
-            $candidates += [PSCustomObject]@{
-                sym    = $sym
-                price  = [math]::Round($price, 2)
-                chgPct = [math]::Round($chgPct, 2)
-                dolVol = [math]::Round($dolVol / 1e6, 1)  # in $M
+        $syms = $defaultList -join ","
+        $snap = Invoke-RestMethod "$DATA_BASE/v2/stocks/snapshots?symbols=$syms&feed=iex" -Headers $hdr -ErrorAction Stop
+        $candidates = foreach ($prop in $snap.PSObject.Properties) {
+            $d = $prop.Value
+            $price = [double]$d.latestTrade.p
+            $prev  = [double]$d.prevDailyBar.c
+            if ($price -le 0 -or $prev -le 0) { continue }
+            [PSCustomObject]@{
+                sym    = $prop.Name
+                chgPct = [math]::Round((($price - $prev) / $prev) * 100, 2)
+                dolVol = [math]::Round($price * [double]$d.dailyBar.v / 1e6, 1)
             }
         }
-
-        # Sort by absolute % change * dollar volume (high momentum + liquidity)
-        $top = $candidates | Sort-Object { [math]::Abs($_.chgPct) * $_.dolVol } -Descending | Select-Object -First 15
+        $top = @($candidates | Sort-Object { [math]::Abs($_.chgPct) * $_.dolVol } -Descending | Select-Object -First 15)
         Log "Top movers: $(($top | ForEach-Object { "$($_.sym)($($_.chgPct)%)" }) -join ', ')"
         return @($top | ForEach-Object { $_.sym })
     } catch {
-        Log "Stock screener error: $($_.Exception.Message)"
-        # Fallback to curated high-liquidity list
-        return @("AAPL","MSFT","NVDA","TSLA","META","AMZN","GOOGL","AMD","NFLX","PLTR","COIN","SMCI","ARM","AVGO","SOFI")
+        Log "Screener error: $($_.Exception.Message) - using default list"
+        return $defaultList
     }
 }
 
 function Save-State($dec, $existing) {
-    $s = [PSCustomObject]@{
+    [PSCustomObject]@{
         btc_ob_demand  = if ($dec.btc_ob_demand)  { $dec.btc_ob_demand }  else { $existing.btc_ob_demand }
         btc_ob_supply  = if ($dec.btc_ob_supply)  { $dec.btc_ob_supply }  else { $existing.btc_ob_supply }
         btc_last_label = if ($dec.btc_last_label) { $dec.btc_last_label } else { $existing.btc_last_label }
@@ -112,89 +101,77 @@ function Save-State($dec, $existing) {
         sol_last_label = if ($dec.sol_last_label) { $dec.sol_last_label } else { $existing.sol_last_label }
         stock_symbols  = if ($dec.stock_symbols)  { $dec.stock_symbols }  else { $existing.stock_symbols }
         last_scan      = (Get-Date -Format "o")
+    } | ConvertTo-Json | Out-File $STATE_FILE -Encoding ascii
+}
+
+function Build-Prompt($st, $stockSymbols, $marketOpen) {
+    $btcState = "demand=$($st.btc_ob_demand)|supply=$($st.btc_ob_supply)|last=$($st.btc_last_label)"
+    $solState = "demand=$($st.sol_ob_demand)|supply=$($st.sol_ob_supply)|last=$($st.sol_last_label)"
+
+    $stockBlock = if ($marketOpen -and $stockSymbols.Count -gt 0) {
+        "STOCKS open - also scan: " + ($stockSymbols -join ",") + " (atype=stock, no price offset)"
+    } else {
+        "STOCKS: closed - skip."
     }
-    $s | ConvertTo-Json | Out-File $STATE_FILE -Encoding ascii
+
+    $jsonTrade = '{"action":"LONG","sym":"BTC/USD","entry":109500,"stop":109400,"t1":109700,"t2":109800,"atype":"crypto","btc_ob_demand":"109400-109420","btc_ob_supply":"none","btc_last_label":"BOS","sol_ob_demand":"none","sol_ob_supply":"none","sol_last_label":"none","stock_symbols":[]}'
+    $jsonWait  = '{"action":"WAIT","btc_ob_demand":"none","btc_ob_supply":"none","btc_last_label":"none","sol_ob_demand":"none","sol_ob_supply":"none","sol_last_label":"none","stock_symbols":[]}'
+
+    return (
+        "1-min SMC scalper. TradingView MCP. DO tool calls first, JSON last line, nothing after.`n" +
+        "`n" +
+        "RULES: LuxAlgo SMC 1-min. LONG=price in demand OB+latest label bullish CHoCH/BOS. SHORT=price in supply OB+latest label bearish CHoCH. Stop<=1% RR>=1.5. BTC/ETH entry-=3(Alpaca lag). SOL entry-=0.05.`n" +
+        "PRIOR STATE: BTC[$btcState] SOL[$solState]`n" +
+        "$stockBlock`n" +
+        "`n" +
+        "DO NOW (no commentary, just tool calls then JSON):`n" +
+        "1. chart_set_symbol COINBASE:BTCUSD -> data_get_ohlcv(count=2) -> data_get_pine_boxes(study_filter=Smart Money Concepts) -> data_get_pine_labels(study_filter=Smart Money Concepts,max_labels=5)`n" +
+        "2. chart_set_symbol COINBASE:SOLUSD -> same 3 tools`n" +
+        "3. If stocks open: chart_set_symbol for each, same tools`n" +
+        "4. Pick best setup or WAIT`n" +
+        "LAST LINE MUST BE JSON:`n" +
+        $jsonTrade + "`n" +
+        "OR: " + $jsonWait
+    )
 }
 
 Log "=== TV_1MIN_SCANNER STARTED (PID=$PID) ==="
-Log "Crypto: always on | Stocks: market hours only (9:30-16:00 ET)"
+Log "Base: $BASE_DIR | Crypto 24/7 | Stocks: market hours (ET)"
+
+function Is-TradingViewRunning {
+    $tv = Get-Process -Name "TradingView","tv" -ErrorAction SilentlyContinue
+    return ($tv -ne $null -and $tv.Count -gt 0)
+}
 
 while ($true) {
     try {
+        # Skip Claude API call if TradingView Desktop isn't running
+        if (-not (Is-TradingViewRunning)) {
+            Log "TradingView not running - skipping scan (sleeping 60s)"
+            Start-Sleep 60
+            continue
+        }
+
         $openCount = Get-OpenPositionCount
-        if ($openCount -ge $MAX_OPEN_POSITIONS) {
-            Log "Max positions ($MAX_OPEN_POSITIONS) open — skipping scan"
+        if ($openCount -ge $MAX_POSITIONS) {
+            Log "Max positions ($MAX_POSITIONS) open - skip scan"
             Start-Sleep $SCAN_INTERVAL
             continue
         }
 
-        $st           = Get-ScanState
-        $marketOpen   = Is-MarketOpen
-        $preMarket    = Is-PreMarket
-        $stockSymbols = @()
+        $st          = Get-ScanState
+        $marketOpen  = Is-MarketOpen
+        $preMarket   = Is-PreMarket
+        $stockSyms   = if ($marketOpen -or $preMarket) { Get-TopStocks } else { @() }
+        $prompt      = Build-Prompt $st $stockSyms $marketOpen
 
-        # Refresh stock watchlist at market open or pre-market
-        if ($marketOpen -or $preMarket) {
-            $stockSymbols = Get-TopStocks
-            # Build stock scan lines for prompt
-            $stockScanLines = ($stockSymbols | ForEach-Object {
-                "chart_set_symbol $_; data_get_ohlcv(3); data_get_pine_boxes(Smart Money); data_get_pine_labels(Smart Money,14)"
-            }) -join "`n"
-        }
-
-        $stockSection = if ($stockSymbols.Count -gt 0) {
-            @"
-
-STOCK SYMBOLS TO SCAN (market is OPEN): $($stockSymbols -join ', ')
-For each stock symbol above, run the same 4-step scan. Stock entries use AType=stock.
-Stocks: no Alpaca feed offset needed (IEX feed is real-time).
-Max stop for stocks: 1% from entry.
-"@
-        } else {
-            "STOCKS: Market closed — skip stock scanning."
-        }
-
-        $prompt = @"
-You are a 1-min SMC scanner. Use TradingView MCP tools to scan for entries.
-
-STRATEGY: LuxAlgo "Smart Money Concepts [LuxAlgo]" indicator on 1-min chart.
-Entry rule: price touches OB zone + most recent CHoCH/BOS label confirms direction.
-- LONG: price inside demand OB + most recent label is bullish CHoCH or BOS
-- SHORT: price inside supply OB + most recent label is bearish CHoCH
-- Stop <= 1% from entry. RR >= 1.5.
-- BTC/ETH: Alpaca price ~3 dollars below TradingView. Subtract 3 from TV levels for Alpaca.
-- SOL: Alpaca ~0.05 below TradingView.
-- Stocks: No offset needed.
-
-LAST KNOWN STATE:
-BTC: demand_ob=$($st.btc_ob_demand) | supply_ob=$($st.btc_ob_supply) | last_label=$($st.btc_last_label)
-SOL: demand_ob=$($st.sol_ob_demand) | supply_ob=$($st.sol_ob_supply) | last_label=$($st.sol_last_label)
-$stockSection
-
-SCAN STEPS:
-1. chart_set_symbol COINBASE:BTCUSD → data_get_ohlcv(3) + data_get_pine_boxes("Smart Money") + data_get_pine_labels("Smart Money",14)
-2. chart_set_symbol COINBASE:SOLUSD → same three tools
-3. $($if ($stockSymbols.Count -gt 0) { "For each stock symbol, chart_set_symbol [SYM] + same three tools." } else { "Skip stocks (market closed)." })
-4. Evaluate all symbols. Find the BEST single entry (highest RR + cleanest structure).
-5. Output EXACTLY ONE JSON line as the absolute last line of your response.
-
-JSON for trade signal:
-{"action":"LONG","sym":"NVDA","entry":890.50,"stop":888.50,"t1":894.50,"t2":896.50,"atype":"stock","btc_ob_demand":"...","btc_ob_supply":"...","btc_last_label":"...","sol_ob_demand":"...","sol_ob_supply":"...","sol_last_label":"...","stock_symbols":["NVDA","AAPL","TSLA"]}
-
-JSON for no signal:
-{"action":"WAIT","btc_ob_demand":"...","btc_ob_supply":"...","btc_last_label":"...","sol_ob_demand":"...","sol_ob_supply":"...","sol_last_label":"...","stock_symbols":["NVDA","AAPL","TSLA"]}
-
-The JSON must be the last line. No text after it.
-"@
-
-        Log "Scanning (open_positions=$openCount, market_open=$marketOpen, stocks=$($stockSymbols.Count))..."
-        $raw    = & claude -p $prompt 2>&1
-        $output = ($raw | Out-String)
-        $lines  = $output -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
-        $json   = $lines | Where-Object { $_ -match '^\{"action"' } | Select-Object -Last 1
+        Log "Scanning... (positions=$openCount market=$marketOpen stocks=$($stockSyms.Count))"
+        $raw   = & claude -p $prompt --dangerously-skip-permissions 2>&1
+        $lines = ($raw | Out-String) -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
+        $json  = $lines | Where-Object { $_ -match '^\{.{0,5}"action"' } | Select-Object -Last 1
 
         if (-not $json) {
-            Log "No JSON found. Tail: $(($lines | Select-Object -Last 3) -join ' || ')"
+            Log "No JSON. Tail: $(($lines | Select-Object -Last 3) -join ' | ')"
             Start-Sleep $SCAN_INTERVAL
             continue
         }
@@ -202,18 +179,11 @@ The JSON must be the last line. No text after it.
         $dec = $json | ConvertFrom-Json
         Save-State $dec $st
 
-        if ($dec.action -in @("LONG", "SHORT")) {
-            Log "*** SIGNAL: $($dec.action) $($dec.sym) entry=$($dec.entry) stop=$($dec.stop) t1=$($dec.t1) t2=$($dec.t2) atype=$($dec.atype) ***"
-            & "$PSScriptRoot\tv_1min_trader.ps1" `
-                -Sym   $dec.sym `
-                -Dir   $dec.action `
-                -Entry $dec.entry `
-                -Stop  $dec.stop `
-                -T1    $dec.t1 `
-                -T2    $dec.t2 `
-                -AType $dec.atype
-            Log "Trade placed. Sleeping 30s."
-            Start-Sleep 30
+        if ($dec.action -in @("LONG","SHORT")) {
+            Log "*** $($dec.action) $($dec.sym) entry=$($dec.entry) stop=$($dec.stop) t1=$($dec.t1) t2=$($dec.t2) ***"
+            & $TRADER -Sym $dec.sym -Dir $dec.action -Entry $dec.entry -Stop $dec.stop -T1 $dec.t1 -T2 $dec.t2 -AType $dec.atype
+            Log "Trade placed - sleeping 10s"
+            Start-Sleep 10
         } else {
             Log "WAIT | BTC:$($dec.btc_last_label) | SOL:$($dec.sol_last_label)"
         }
