@@ -22,6 +22,14 @@ function Write-Narr($msg) {
     Write-Output $msg
 }
 
+function Send-Discord($msg) {
+    if (-not $env:DISCORD_WEBHOOK_URL) { return }
+    try {
+        $body = @{ content=$msg; username="AlpacaBot" } | ConvertTo-Json
+        Invoke-RestMethod -Uri $env:DISCORD_WEBHOOK_URL -Method Post -Headers @{"Content-Type"="application/json"} -Body $body | Out-Null
+    } catch {}
+}
+
 function Log-Trade($order, $note) {
     if (-not (Test-Path $TRADE_LOG)) {
         "timestamp,order_id,symbol,side,qty,status,filled_avg_price,note" | Out-File $TRADE_LOG -Encoding ascii
@@ -204,6 +212,8 @@ foreach ($pos in $positions) {
                 }
                 Write-Narr "$sym - STOPPED OUT at $exitPx | PnL: `$$pnl"
                 Log-Trade $so "smc_stop_hit"
+                $pnlSign = if ($pnl -ge 0) { "+" } else { "" }
+                Send-Discord "STOPPED OUT: $sym | Exit: $exitPx | P&L: $pnlSign`$$pnl"
                 $state.daily_pnl = [double]$state.daily_pnl + $pnl
                 if ($pnl -lt 0) { $state.consecutive_losses = [int]$state.consecutive_losses + 1 }
                 else             { $state.consecutive_losses = 0 }
@@ -258,6 +268,7 @@ foreach ($pos in $positions) {
             Write-Narr "$sym - T1 FILLED at $([double]$t1Ord.filled_avg_price)! (50% exited)"
             $t1Fired = $true; $pos.t1_fired = $true; $pos.phase = "t1_fired"
             Log-Trade $t1Ord "smc_t1_fill"
+            Send-Discord "T1 HIT: $sym | Fill: $([double]$t1Ord.filled_avg_price) | 50% closed, stop -> breakeven"
             if ($pos.stop_order_id) { Cancel-Order $pos.stop_order_id; $pos.stop_order_id = $null }
 
             # Move stop to breakeven
@@ -297,6 +308,7 @@ foreach ($pos in $positions) {
             Write-Narr "$sym - T2 FILLED at $([double]$t2Ord.filled_avg_price)! Trailing last $curQty"
             $t2Fired = $true; $pos.t2_fired = $true; $pos.phase = "trailing"
             Log-Trade $t2Ord "smc_t2_fill"
+            Send-Discord "T2 HIT: $sym | Fill: $([double]$t2Ord.filled_avg_price) | Trailing last $curQty"
             if ($pos.stop_order_id) { Cancel-Order $pos.stop_order_id; $pos.stop_order_id = $null }
         }
     }

@@ -64,6 +64,14 @@ function Log-Trade($order, $note) {
     "$(Get-Date -Format o),$($order.id),$($order.symbol),$($order.side),$($order.qty),$($order.status),$($order.filled_avg_price),""$note""" | Add-Content $TRADE_LOG
 }
 
+function Send-Discord($msg) {
+    if (-not $env:DISCORD_WEBHOOK_URL) { return }
+    try {
+        $body = @{ content=$msg; username="AlpacaBot" } | ConvertTo-Json
+        Invoke-RestMethod -Uri $env:DISCORD_WEBHOOK_URL -Method Post -Headers @{"Content-Type"="application/json"} -Body $body | Out-Null
+    } catch {}
+}
+
 function Get-Account { Invoke-RestMethod -Uri "$($env:APCA_API_BASE_URL)/v2/account" -Method Get -Headers $alpacaHeaders }
 
 function Get-State {
@@ -402,6 +410,7 @@ foreach ($c in $ranked) {
         $state.positions = @($state.positions) + @($pos)
         Save-State $state
         Write-Narr "$sym LIVE $dir | entry=$([math]::Round($fillPrice,$dp)) stop=$fillStop T1=$fillT1 T2=$fillT2 risk=`$$riskAmt grade=$($c.grade)"
+        Send-Discord "TRADE ENTERED: $sym $dir | Entry: $([math]::Round($fillPrice,$dp)) | Stop: $fillStop | T1: $fillT1 | T2: $fillT2 | Grade: $($c.grade) ($($c.score)) | Risk: `$$riskAmt"
         $entered++
 
     } catch { Write-Narr "$sym - ENTRY FAILED: $($_.Exception.Message)" }
