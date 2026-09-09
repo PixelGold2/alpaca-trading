@@ -2,3 +2,23 @@ config.ps1
 logs/*.csv
 twitter_monitor/.env
 twitter_monitor/accounts.db
+analyst_ratings/.env
+.claude/settings.local.json
+
+# Python (quant/ and any future Python subprojects)
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+
+# Quant trading system
+quant/.env
+quant/data_cache/
+
+# Terminal app
+terminal/node_modules/
+terminal/.next/
+terminal/.env
+terminal/.env.local
+terminal/*.tsbuildinfo

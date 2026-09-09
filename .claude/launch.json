@@ -1,0 +1,18 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "terminal-dev",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "terminal", "run", "dev"],
+      "port": 3000,
+      "autoPort": true
+    },
+    {
+      "name": "terminal-dev-preview",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "terminal", "run", "dev", "--", "-p", "3100"],
+      "port": 3100
+    }
+  ]
+}

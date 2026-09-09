@@ -1,0 +1,12 @@
+{
+    "btc_ob_demand":  "none",
+    "btc_ob_supply":  "none",
+    "btc_last_label":  "none",
+    "sol_ob_demand":  "none",
+    "sol_ob_supply":  "none",
+    "sol_last_label":  "none",
+    "stock_symbols":  {
+
+                      },
+    "last_scan":  "2026-09-08T16:26:30.9608151+03:00"
+}

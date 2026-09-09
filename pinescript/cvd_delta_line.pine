@@ -1,0 +1,110 @@
+//@version=6
+indicator("CVD Delta Line [Orderflow]", shorttitle="CVD Delta", format=format.volume, precision=0)
+
+// ============================================================================
+// CUMULATIVE VOLUME DELTA (CVD)
+// Approximates real buy/sell volume delta by decomposing every bar into
+// lower-timeframe (intrabar) candles and splitting each intrabar's volume
+// proportionally across its range using its close position (the same method
+// used by exchange-native CVD/orderflow tools when true bid/ask tick data
+// isn't available). This is materially more accurate than a single
+// close>open per-bar approximation because it captures what happened
+// *inside* every candle, not just its net direction.
+//
+// Note: Pine Script has no access to real bid/ask tick data, so this is an
+// estimate — the most accurate one achievable from OHLCV alone. For true
+// tick-level CVD you need a bid/ask feed (e.g. exchange order flow tools).
+// ============================================================================
+
+// === Inputs ===
+grpCalc = "Calculation"
+ltfMode    = input.string("Auto", "Lower Timeframe Mode", options = ["Auto", "Manual"], group = grpCalc, tooltip = "Auto picks the finest reliable intrabar resolution for the current chart timeframe.")
+manualLTF  = input.timeframe("1", "Manual Lower Timeframe", group = grpCalc, tooltip = "Only used when Mode = Manual. Must be lower than the chart timeframe.")
+volMode    = input.string("Intrabar (Accurate)", "Delta Method", options = ["Intrabar (Accurate)", "OHLC Estimate (No LTF)"], group = grpCalc, tooltip = "Intrabar decomposes each bar using lower-timeframe candles. OHLC Estimate uses only the current bar's range (faster, less accurate).")
+
+grpReset = "Reset"
+resetMode = input.string("Daily", "Reset CVD", options = ["None", "Daily", "Weekly", "Monthly"], group = grpReset, tooltip = "Daily mirrors how most exchange-native CVD tools reset each session.")
+
+grpDisp = "Display"
+showHist  = input.bool(true, "Show per-bar delta histogram", group = grpDisp)
+showMA    = input.bool(true, "Show CVD moving average", group = grpDisp)
+maLen     = input.int(20, "MA Length", minval = 1, group = grpDisp)
+maType    = input.string("EMA", "MA Type", options = ["SMA", "EMA", "WMA"], group = grpDisp)
+showFill  = input.bool(true, "Fill CVD area", group = grpDisp)
+
+colorUp   = input.color(color.new(color.teal, 0), "Up Color", group = grpDisp)
+colorDown = input.color(color.new(color.red, 0), "Down Color", group = grpDisp)
+
+// === Lower timeframe selection ===
+secsTF = timeframe.in_seconds(timeframe.period)
+string autoLTF = secsTF <= 60 ? "1S" : secsTF <= 3600 ? "1" : secsTF <= 14400 ? "5" : "15"
+ltf = ltfMode == "Manual" ? manualLTF : autoLTF
+
+// === Pull intrabar OHLCV (always requested; ignored when method = OHLC Estimate) ===
+[iOpen, iHigh, iLow, iClose, iVolume] = request.security_lower_tf(syminfo.tickerid, ltf, [open, high, low, close, volume], ignore_invalid_timeframe = true)
+
+// Proportional buy/sell split for a single candle: where close sits within
+// its high-low range decides how much of that candle's volume counts as
+// buying vs selling pressure. Zero-range candles fall back to close-vs-open.
+splitDelta(o, h, l, c, v) =>
+    rng = h - l
+    float bv = na
+    float sv = na
+    if rng > 0
+        bv := v * (c - l) / rng
+        sv := v * (h - c) / rng
+    else if c > o
+        bv := v
+        sv := 0.0
+    else if c < o
+        bv := 0.0
+        sv := v
+    else
+        bv := v * 0.5
+        sv := v * 0.5
+    bv - sv
+
+// Sum the intrabar deltas for the current bar
+ltfBarCount = array.size(iClose)
+float ltfSum = 0.0
+if ltfBarCount > 0
+    for i = 0 to ltfBarCount - 1
+        ltfSum += splitDelta(array.get(iOpen, i), array.get(iHigh, i), array.get(iLow, i), array.get(iClose, i), array.get(iVolume, i))
+
+// Fallback estimate using only the current bar (used when method = OHLC Estimate,
+// or when no intrabar data is available, e.g. history limit reached)
+currentBarEstimate = splitDelta(open, high, low, close, volume)
+
+useIntrabar = volMode == "Intrabar (Accurate)" and ltfBarCount > 0
+barDelta = useIntrabar ? ltfSum : currentBarEstimate
+
+// === Cumulative sum with reset ===
+resetNow = switch resetMode
+    "Daily"   => ta.change(time("D")) != 0
+    "Weekly"  => ta.change(time("W")) != 0
+    "Monthly" => ta.change(time("M")) != 0
+    => false
+
+var float cvd = 0.0
+cvd := resetNow ? barDelta : cvd + barDelta
+
+// === Moving average ===
+cvdMA = switch maType
+    "SMA" => ta.sma(cvd, maLen)
+    "EMA" => ta.ema(cvd, maLen)
+    "WMA" => ta.wma(cvd, maLen)
+
+// === Plots ===
+cvdColor = cvd >= cvd[1] ? colorUp : colorDown
+
+plot(showHist ? barDelta : na, title = "Per-bar Delta", style = plot.style_columns, color = color.new(barDelta >= 0 ? colorUp : colorDown, 55))
+
+zeroLine = plot(0.0, title = "Zero", color = color.new(color.gray, 70), display = display.pane)
+cvdPlot  = plot(cvd, title = "CVD", color = cvdColor, linewidth = 2)
+plot(showMA ? cvdMA : na, title = "CVD MA", color = color.new(color.orange, 20), linewidth = 1)
+
+fill(zeroLine, cvdPlot, color = showFill ? color.new(cvdColor, 85) : na, title = "CVD Fill")
+
+// === Alerts ===
+alertcondition(ta.crossover(cvd, 0), title = "CVD Crosses Above Zero", message = "CVD crossed above zero on {{ticker}} ({{interval}})")
+alertcondition(ta.crossunder(cvd, 0), title = "CVD Crosses Below Zero", message = "CVD crossed below zero on {{ticker}} ({{interval}})")

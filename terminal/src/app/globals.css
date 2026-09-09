@@ -1,0 +1,119 @@
+@import "tailwindcss";
+
+:root {
+  --bg-app: #0a0d12;
+  --bg-panel: #10141b;
+  --bg-panel-raised: #161b24;
+  --bg-hover: #1c2330;
+  --border: #232a37;
+  --border-strong: #2f3847;
+  --text-primary: #e6e9ef;
+  --text-secondary: #8b93a3;
+  --text-muted: #5b6474;
+  --accent: #3b82f6;
+  --accent-strong: #60a5fa;
+  --positive: #16c784;
+  --negative: #ef4444;
+  --warning: #f59e0b;
+  --attention: #eab308;
+  --demo: #a78bfa;
+  --font-mono: var(--font-geist-mono);
+  --font-sans: var(--font-geist-sans);
+}
+
+/* Light theme — overrides every token above. Set via data-theme="light" on
+   <html> (see PreferencesProvider.tsx / the no-flash script in layout.tsx).
+   Every component reads colors through these same custom properties (no
+   hardcoded hex in components), so this block is the only place that needs
+   light-mode values. */
+:root[data-theme="light"] {
+  --bg-app: #f4f5f7;
+  --bg-panel: #ffffff;
+  --bg-panel-raised: #f8f9fb;
+  --bg-hover: #eef0f3;
+  --border: #dde1e7;
+  --border-strong: #c5cbd4;
+  --text-primary: #14171c;
+  --text-secondary: #4b5563;
+  --text-muted: #8b93a3;
+  --accent: #2563eb;
+  --accent-strong: #1d4ed8;
+  --positive: #0f9d63;
+  --negative: #dc2626;
+  --warning: #b45309;
+  --attention: #a16207;
+  --demo: #7c3aed;
+}
+
+@theme inline {
+  --color-bg-app: var(--bg-app);
+  --color-bg-panel: var(--bg-panel);
+  --color-bg-panel-raised: var(--bg-panel-raised);
+  --color-bg-hover: var(--bg-hover);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-text-primary: var(--text-primary);
+  --color-text-secondary: var(--text-secondary);
+  --color-text-muted: var(--text-muted);
+  --color-accent: var(--accent);
+  --color-accent-strong: var(--accent-strong);
+  --color-positive: var(--positive);
+  --color-negative: var(--negative);
+  --color-warning: var(--warning);
+  --color-attention: var(--attention);
+  --color-demo: var(--demo);
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+}
+
+body {
+  background: var(--bg-app);
+  color: var(--text-primary);
+  font-family: var(--font-sans), Arial, Helvetica, sans-serif;
+}
+
+::selection {
+  background: var(--accent);
+  color: white;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+
+/* Radar-pulse marker for critical/breaking World Tracker map events. Created
+   as a plain maplibregl.Marker DOM element (see WorldMap.tsx), outside
+   React's tree, so these classes must be global rather than component-scoped. */
+.wt-pulse-marker {
+  position: relative;
+  width: 14px;
+  height: 14px;
+}
+.wt-pulse-dot {
+  position: absolute;
+  inset: 0;
+  border-radius: 9999px;
+  box-shadow: 0 0 0 2px var(--bg-app);
+}
+.wt-pulse-ring {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 14px;
+  height: 14px;
+  margin: -7px 0 0 -7px;
+  border-radius: 9999px;
+  border: 2px solid;
+  animation: wt-pulse 1.8s ease-out infinite;
+}
+@keyframes wt-pulse {
+  0% {
+    transform: scale(1);
+    opacity: 0.85;
+  }
+  100% {
+    transform: scale(3.4);
+    opacity: 0;
+  }
+}
